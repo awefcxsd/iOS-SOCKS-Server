@@ -19,8 +19,21 @@ class BackgroundAudio:
         self.player_error = None
         self.audio_session = None
         self.native_session_active = False
+        self.host_supports_background_audio = None
         self.session_error = None
         self.error = None
+
+    def _check_host_background_audio_mode(self):
+        try:
+            from objc_util import ObjCClass
+
+            info = ObjCClass("NSBundle").mainBundle().infoDictionary()
+            modes = info.objectForKey_("UIBackgroundModes")
+            self.host_supports_background_audio = bool(
+                modes and any(str(mode) == "audio" for mode in modes)
+            )
+        except Exception:
+            self.host_supports_background_audio = None
 
     def _activate_native_audio_session(self):
         try:
@@ -28,8 +41,13 @@ class BackgroundAudio:
 
             audio_session_class = ObjCClass("AVAudioSession")
             self.audio_session = audio_session_class.sharedInstance()
-            self.audio_session.setCategory_error_("AVAudioSessionCategoryPlayback", None)
-            self.audio_session.setActive_error_(True, None)
+            # Match Pyto's BackgroundTask: playback bypasses the silent switch,
+            # mixWithOthers avoids interrupting existing audio, and the active
+            # option restores other sessions when this server stops.
+            self.audio_session.setCategory_withOptions_error_(
+                "AVAudioSessionCategoryPlayback", 1, None
+            )
+            self.audio_session.setActive_withOptions_error_(True, 1, None)
             self.native_session_active = True
             return True
         except Exception as error:
@@ -100,6 +118,7 @@ class BackgroundAudio:
     def start(self):
         try:
             self._create_audio_file()
+            self._check_host_background_audio_mode()
             try:
                 self._start_native_player()
             except Exception as error:
@@ -120,6 +139,6 @@ class BackgroundAudio:
             self.player = None
             self.player_backend = None
         if self.native_session_active:
-            self.audio_session.setActive_error_(False, None)
+            self.audio_session.setActive_withOptions_error_(False, 1, None)
             self.native_session_active = False
             self.audio_session = None

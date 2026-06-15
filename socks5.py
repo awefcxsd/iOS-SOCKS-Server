@@ -296,6 +296,13 @@ if __name__ == "__main__":
         initial_output += "Background audio enabled ({}, {}, {})\n".format(
             audio_mode, session_mode, background_audio.player_backend
         )
+        if background_audio.host_supports_background_audio is False:
+            initial_output += (
+                "Warning: Pythonista does not declare the iOS audio background mode; "
+                "playback will pause when the app leaves the foreground.\n"
+            )
+        elif background_audio.host_supports_background_audio is True:
+            initial_output += "Host app declares the iOS audio background mode\n"
     elif KEEP_ALIVE_WITH_AUDIO:
         initial_output += "Background audio keep-alive unavailable: {}\n".format(
             background_audio.error
