@@ -36,6 +36,10 @@ A simple HTTP/SOCKS proxy designed to run on Pythonista on iOS, letting you fake
   `UIBackgroundModes`. The script checks Pythonista's bundle for that declaration
   and prints a warning when it is absent. Neither an internal Python loop nor
   `UIApplication.beginBackgroundTask` can replace it for indefinite operation.
+- When running in Pyto, the script uses Pyto's supported
+  `background.BackgroundTask` API directly. This backend also restarts audio
+  after an iOS audio-session interruption. The status display identifies it as
+  `Pyto BackgroundTask`.
 - Point your devices at the PAC URL (also called script URL, script address, etc.), or configure them to use the SOCKS proxy listed.
     - For iOS devices: open Settings, tap on Wi-Fi, tap on the (i) icon next to the network, scroll down to HTTP Proxy, tap on Configure Proxy, select Automatic, and enter the PAC URL as displayed in Pythonista in the URL field (the URL will look like http://123.123.123.123:8080/wpad.dat).
     - For macOS: open System Preferences -> Network, click on Wi-Fi, hit Advanced..., and under Proxies check SOCKS Proxy and set the host:port to the SOCKS Address as displayed in Pythonista (this will be of the form 123.123.123.123:9876).

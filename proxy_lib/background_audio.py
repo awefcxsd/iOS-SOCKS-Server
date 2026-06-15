@@ -15,6 +15,7 @@ class BackgroundAudio:
             os.path.dirname(os.path.abspath(__file__)), filename
         )
         self.player = None
+        self.background_task = None
         self.player_backend = None
         self.player_error = None
         self.audio_session = None
@@ -22,6 +23,19 @@ class BackgroundAudio:
         self.host_supports_background_audio = None
         self.session_error = None
         self.error = None
+
+    def _start_pyto_background_task(self):
+        import background
+
+        background_task_class = getattr(background, "BackgroundTask", None)
+        if background_task_class is None:
+            raise ImportError("background.BackgroundTask is unavailable")
+
+        self.background_task = background_task_class(audio_path=self.audio_path)
+        self.background_task.reminder_notifications = False
+        self.background_task.start()
+        self.host_supports_background_audio = True
+        self.player_backend = "Pyto BackgroundTask"
 
     def _check_host_background_audio_mode(self):
         try:
@@ -118,22 +132,31 @@ class BackgroundAudio:
     def start(self):
         try:
             self._create_audio_file()
-            self._check_host_background_audio_mode()
             try:
-                self._start_native_player()
-            except Exception as error:
-                self.player_error = error
-                self.player = None
-                self._start_pythonista_player()
+                self._start_pyto_background_task()
+            except (ImportError, ModuleNotFoundError):
+                self._check_host_background_audio_mode()
+                try:
+                    self._start_native_player()
+                except Exception as error:
+                    self.player_error = error
+                    self.player = None
+                    self._start_pythonista_player()
         except Exception as error:
             self.error = error
             self.player = None
+            self.background_task = None
             self.player_backend = None
             return False
 
         return True
 
     def stop(self):
+        if self.background_task is not None:
+            background_task = self.background_task
+            self.background_task = None
+            self.player_backend = None
+            background_task.stop()
         if self.player is not None:
             self.player.stop()
             self.player = None

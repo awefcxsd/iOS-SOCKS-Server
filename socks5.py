@@ -7,11 +7,11 @@ import logging
 import socket
 import threading
 
-from lib.background_audio import BackgroundAudio
-from lib.http_proxy_server import AsyncHTTPProxyHandler
-from lib.proxy_server import AsyncProxyServer
-from lib.socks5_server import AsyncSocks5Handler
-from lib.status import StatusMonitor
+from proxy_lib.background_audio import BackgroundAudio
+from proxy_lib.http_proxy_server import AsyncHTTPProxyHandler
+from proxy_lib.proxy_server import AsyncProxyServer
+from proxy_lib.socks5_server import AsyncSocks5Handler
+from proxy_lib.status import StatusMonitor
 
 logging.basicConfig(level=logging.ERROR)
 
@@ -92,7 +92,7 @@ try:
 
     from collections import defaultdict
 
-    from lib import ifaddrs
+    from proxy_lib import ifaddrs
 
     initial_output = ""
     ipv4_output = ""
@@ -288,11 +288,12 @@ if __name__ == "__main__":
 
     if background_audio_enabled:
         audio_mode = "440 Hz test tone" if BACKGROUND_AUDIO_TEST_TONE else "silence"
-        session_mode = (
-            "native playback session"
-            if background_audio.native_session_active
-            else "Pythonista player only"
-        )
+        if background_audio.player_backend == "Pyto BackgroundTask":
+            session_mode = "Pyto background task"
+        elif background_audio.native_session_active:
+            session_mode = "native playback session"
+        else:
+            session_mode = "Pythonista player only"
         initial_output += "Background audio enabled ({}, {}, {})\n".format(
             audio_mode, session_mode, background_audio.player_backend
         )
