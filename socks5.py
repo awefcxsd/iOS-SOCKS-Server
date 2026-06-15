@@ -2,6 +2,7 @@
 # Socks5/HTTP Proxy server for Pythonista by @nneonneo
 # Pretty statistics view and IPv6 support added by @philrosenthal
 
+import asyncio
 import ipaddress
 import logging
 import socket
@@ -35,6 +36,14 @@ CUSTOM_RESOLVERS = []
 KEEP_ALIVE_WITH_AUDIO = True
 # Play a quiet 440 Hz tone instead of silence to verify background playback.
 BACKGROUND_AUDIO_TEST_TONE = False
+
+# Stop the server when the WiFi connection used at startup goes away. iOS does
+# not reliably expose the SSID to Pyto, so this name is a label for the network
+# that must be connected when the script starts.
+EXIT_ON_WIFI_DISCONNECT = True
+WIFI_NETWORK_NAME = "Subaru_5G"
+WIFI_CHECK_INTERVAL = 2
+WIFI_DISCONNECT_CHECKS = 3
 
 # Try to keep the screen from turning off (iOS)
 try:
@@ -97,6 +106,8 @@ try:
     initial_output = ""
     ipv4_output = ""
     ipv6_output = ""
+    wifi_interface_name = None
+    wifi_interface_address = None
 
     interfaces = ifaddrs.get_interfaces()
     iftypes = defaultdict(list)
@@ -144,6 +155,8 @@ try:
             None,
         )
         if iface:
+            wifi_interface_name = iface.name
+            wifi_interface_address = iface.addr.address
             initial_output += (
                 "Assuming proxy will be accessed over WiFi (%s) at %s\n"
                 % (iface.name, iface.addr.address)
@@ -229,6 +242,41 @@ except Exception as e:
     traceback.print_exc()
 
     interfaces = None
+    wifi_interface_name = None
+    wifi_interface_address = None
+
+
+def wifi_connection_is_active(interface_name, interface_address):
+    """Return whether the WiFi interface still has its startup IPv4 address."""
+    try:
+        from proxy_lib import ifaddrs
+
+        return any(
+            iface.name == interface_name
+            and iface.addr
+            and iface.addr.family == socket.AF_INET
+            and iface.addr.address == interface_address
+            for iface in ifaddrs.get_interfaces()
+        )
+    except Exception as e:
+        logging.warning("Could not check WiFi connection: %s", e)
+        return True
+
+
+async def wait_for_wifi_disconnect(interface_name, interface_address):
+    missed_checks = 0
+    while missed_checks < WIFI_DISCONNECT_CHECKS:
+        await asyncio.sleep(WIFI_CHECK_INTERVAL)
+        if wifi_connection_is_active(interface_name, interface_address):
+            missed_checks = 0
+        else:
+            missed_checks += 1
+
+    print(
+        "WiFi network {} disconnected; shutting down server.".format(
+            WIFI_NETWORK_NAME
+        )
+    )
 
 
 def create_wpad_server(hhost, hport, phost, pport):
@@ -279,8 +327,6 @@ def run_wpad_server(server):
 
 
 if __name__ == "__main__":
-    import asyncio
-
     background_audio = BackgroundAudio(test_tone=BACKGROUND_AUDIO_TEST_TONE)
     background_audio_enabled = KEEP_ALIVE_WITH_AUDIO and background_audio.start()
 
@@ -316,6 +362,19 @@ if __name__ == "__main__":
     initial_output += "HTTP Proxy Address: {}:{}\n".format(
         PROXY_HOST or LISTEN_HOST, HTTP_PORT
     )
+    if EXIT_ON_WIFI_DISCONNECT and wifi_interface_name and wifi_interface_address:
+        initial_output += (
+            "Auto-stop: watching {} on {} at {}\n".format(
+                WIFI_NETWORK_NAME,
+                wifi_interface_name,
+                wifi_interface_address,
+            )
+        )
+    elif EXIT_ON_WIFI_DISCONNECT:
+        initial_output += (
+            "Warning: auto-stop is enabled, but no WiFi connection was found "
+            "at startup\n"
+        )
     stats = StatusMonitor(initial_output)
     logging.getLogger().addHandler(stats)
 
@@ -324,7 +383,7 @@ if __name__ == "__main__":
     thread.start()
 
     async def main():
-        server = AsyncProxyServer(
+        socks_server = AsyncProxyServer(
             AsyncSocks5Handler,
             listen_hosts=LISTEN_HOST,
             listen_port=SOCKS_PORT,
@@ -333,9 +392,9 @@ if __name__ == "__main__":
             connect_host_ipv4=CONNECT_HOST_IPV4,
             connect_host_ipv6=CONNECT_HOST_IPV6,
         )
-        asyncio.create_task(server.run())
+        tasks = [asyncio.create_task(socks_server.run())]
 
-        server = AsyncProxyServer(
+        http_server = AsyncProxyServer(
             AsyncHTTPProxyHandler,
             listen_hosts=LISTEN_HOST,
             listen_port=HTTP_PORT,
@@ -344,9 +403,32 @@ if __name__ == "__main__":
             connect_host_ipv4=CONNECT_HOST_IPV4,
             connect_host_ipv6=CONNECT_HOST_IPV6,
         )
-        asyncio.create_task(server.run())
+        tasks.append(asyncio.create_task(http_server.run()))
+        tasks.append(asyncio.create_task(stats.render_forever()))
 
-        await stats.render_forever()
+        wifi_monitor = None
+        if (
+            EXIT_ON_WIFI_DISCONNECT
+            and wifi_interface_name
+            and wifi_interface_address
+        ):
+            wifi_monitor = asyncio.create_task(
+                wait_for_wifi_disconnect(
+                    wifi_interface_name,
+                    wifi_interface_address,
+                )
+            )
+            tasks.append(wifi_monitor)
+
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            if wifi_monitor not in done:
+                for task in done:
+                    await task
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     try:
         asyncio.run(main())

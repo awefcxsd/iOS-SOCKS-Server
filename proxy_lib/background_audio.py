@@ -16,6 +16,7 @@ class BackgroundAudio:
         )
         self.player = None
         self.background_task = None
+        self.pyto_background_module = None
         self.player_backend = None
         self.player_error = None
         self.audio_session = None
@@ -32,10 +33,30 @@ class BackgroundAudio:
             raise ImportError("background.BackgroundTask is unavailable")
 
         self.background_task = background_task_class(audio_path=self.audio_path)
+        self.pyto_background_module = background
         self.background_task.reminder_notifications = False
         self.background_task.start()
         self.host_supports_background_audio = True
         self.player_backend = "Pyto BackgroundTask"
+
+    def _stop_pyto_background_task(self):
+        task = self.background_task
+        background = self.pyto_background_module
+        self.background_task = None
+        self.pyto_background_module = None
+        self.player_backend = None
+
+        # Pyto's public Task.stop() raises TaskExit in the owning thread. During
+        # our finally block that can interrupt proxy cleanup, so stop the native
+        # Swift task directly and remove the Python registry entry ourselves.
+        tasks = getattr(background, "__tasks__", None)
+        if tasks is not None:
+            tasks.pop(task.id, None)
+        native_task = getattr(task, "__background_task__", None)
+        if native_task is not None:
+            native_task.stopBackgroundTask()
+        else:
+            task.stop()
 
     def _check_host_background_audio_mode(self):
         try:
@@ -146,6 +167,7 @@ class BackgroundAudio:
             self.error = error
             self.player = None
             self.background_task = None
+            self.pyto_background_module = None
             self.player_backend = None
             return False
 
@@ -153,10 +175,7 @@ class BackgroundAudio:
 
     def stop(self):
         if self.background_task is not None:
-            background_task = self.background_task
-            self.background_task = None
-            self.player_backend = None
-            background_task.stop()
+            self._stop_pyto_background_task()
         if self.player is not None:
             self.player.stop()
             self.player = None
