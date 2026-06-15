@@ -1,2 +1,4 @@
 *.pyc
 .DS_Store
+lib/background-silence.wav
+lib/background-tone.wav

@@ -7,9 +7,10 @@ import logging
 import socket
 import threading
 
-from lib.socks5_server import AsyncSocks5Handler
+from lib.background_audio import BackgroundAudio
 from lib.http_proxy_server import AsyncHTTPProxyHandler
 from lib.proxy_server import AsyncProxyServer
+from lib.socks5_server import AsyncSocks5Handler
 from lib.status import StatusMonitor
 
 logging.basicConfig(level=logging.ERROR)
@@ -29,6 +30,11 @@ WPAD_PORT = 8088
 
 USE_PHONE_VPN = True
 CUSTOM_RESOLVERS = []
+# Loop silent audio while running so Pythonista can continue executing after
+# iOS sends it to the background. iOS may still suspend or terminate the app.
+KEEP_ALIVE_WITH_AUDIO = True
+# Play a quiet 440 Hz tone instead of silence to verify background playback.
+BACKGROUND_AUDIO_TEST_TONE = False
 
 # Try to keep the screen from turning off (iOS)
 try:
@@ -275,7 +281,18 @@ def run_wpad_server(server):
 if __name__ == "__main__":
     import asyncio
 
+    background_audio = BackgroundAudio(test_tone=BACKGROUND_AUDIO_TEST_TONE)
+    background_audio_enabled = KEEP_ALIVE_WITH_AUDIO and background_audio.start()
+
     wpad_server = create_wpad_server(LISTEN_HOST, WPAD_PORT, PROXY_HOST, SOCKS_PORT)
+
+    if background_audio_enabled:
+        audio_mode = "440 Hz test tone" if BACKGROUND_AUDIO_TEST_TONE else "silence"
+        initial_output += "Background audio keep-alive enabled ({})\n".format(audio_mode)
+    elif KEEP_ALIVE_WITH_AUDIO:
+        initial_output += "Background audio keep-alive unavailable: {}\n".format(
+            background_audio.error
+        )
 
     initial_output += "PAC URL: http://{}:{}/wpad.dat\n".format(PROXY_HOST, WPAD_PORT)
     initial_output += "SOCKS Address: {}:{}\n".format(
@@ -320,4 +337,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Shutting down.")
+    finally:
         wpad_server.shutdown()
+        background_audio.stop()
