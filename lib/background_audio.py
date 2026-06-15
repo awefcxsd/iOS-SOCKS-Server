@@ -15,6 +15,8 @@ class BackgroundAudio:
             os.path.dirname(os.path.abspath(__file__)), filename
         )
         self.player = None
+        self.player_backend = None
+        self.player_error = None
         self.audio_session = None
         self.native_session_active = False
         self.session_error = None
@@ -35,6 +37,41 @@ class BackgroundAudio:
             self.audio_session = None
             self.native_session_active = False
             return False
+
+    def _start_native_player(self):
+        from objc_util import ObjCClass
+
+        audio_player_class = ObjCClass("AVAudioPlayer")
+        url_class = ObjCClass("NSURL")
+        audio_url = url_class.fileURLWithPath_(self.audio_path)
+        self.player = audio_player_class.alloc().initWithContentsOfURL_error_(
+            audio_url, None
+        )
+        if self.player is None:
+            raise RuntimeError("AVAudioPlayer could not open the generated audio file")
+
+        self.player.setNumberOfLoops_(-1)
+        self.player.prepareToPlay()
+        if not self._activate_native_audio_session():
+            raise RuntimeError(
+                "AVAudioSession playback category could not be activated: {}".format(
+                    self.session_error
+                )
+            )
+        if not self.player.play():
+            raise RuntimeError("AVAudioPlayer refused to start playback")
+        self.player_backend = "AVAudioPlayer"
+
+    def _start_pythonista_player(self):
+        import sound
+
+        self.player = sound.Player(self.audio_path)
+        self.player.number_of_loops = -1
+        # sound.Player construction can reset the shared session to an ambient
+        # category, so activate playback only after the player exists.
+        self._activate_native_audio_session()
+        self.player.play()
+        self.player_backend = "sound.Player"
 
     def _create_audio_file(self):
         if os.path.exists(self.audio_path):
@@ -62,17 +99,17 @@ class BackgroundAudio:
 
     def start(self):
         try:
-            import sound
             self._create_audio_file()
-            self._activate_native_audio_session()
-            self.player = sound.Player(self.audio_path)
-            # Player construction may change the shared session configuration.
-            self._activate_native_audio_session()
-            self.player.number_of_loops = -1
-            self.player.play()
+            try:
+                self._start_native_player()
+            except Exception as error:
+                self.player_error = error
+                self.player = None
+                self._start_pythonista_player()
         except Exception as error:
             self.error = error
             self.player = None
+            self.player_backend = None
             return False
 
         return True
@@ -81,6 +118,7 @@ class BackgroundAudio:
         if self.player is not None:
             self.player.stop()
             self.player = None
+            self.player_backend = None
         if self.native_session_active:
             self.audio_session.setActive_error_(False, None)
             self.native_session_active = False

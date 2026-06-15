@@ -293,8 +293,8 @@ if __name__ == "__main__":
             if background_audio.native_session_active
             else "Pythonista player only"
         )
-        initial_output += "Background audio enabled ({}, {})\n".format(
-            audio_mode, session_mode
+        initial_output += "Background audio enabled ({}, {}, {})\n".format(
+            audio_mode, session_mode, background_audio.player_backend
         )
     elif KEEP_ALIVE_WITH_AUDIO:
         initial_output += "Background audio keep-alive unavailable: {}\n".format(

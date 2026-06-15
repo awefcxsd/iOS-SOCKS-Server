@@ -24,8 +24,14 @@ A simple HTTP/SOCKS proxy designed to run on Pythonista on iOS, letting you fake
   makes it easy to confirm that audio continues after locking the screen or
   switching apps. Set it back to `False` for normal silent operation.
 - On iOS, the script also requests the native `AVAudioSessionCategoryPlayback`
-  category. If the status display says `Pythonista player only`, the native API
-  was unavailable and background playback is less likely to work.
+  category and uses `AVAudioPlayer` directly so Pythonista does not own the
+  player lifecycle. If the status display says `Pythonista player only` or
+  `sound.Player`, the native APIs were unavailable and background playback is
+  less likely to work.
+- The playback category should ignore the iPhone Ring/Silent switch. If native
+  playback still pauses whenever Pythonista leaves the foreground, the installed
+  Pythonista build does not permit script-started background audio; a script
+  cannot add the missing iOS app background-mode entitlement.
 - Point your devices at the PAC URL (also called script URL, script address, etc.), or configure them to use the SOCKS proxy listed.
     - For iOS devices: open Settings, tap on Wi-Fi, tap on the (i) icon next to the network, scroll down to HTTP Proxy, tap on Configure Proxy, select Automatic, and enter the PAC URL as displayed in Pythonista in the URL field (the URL will look like http://123.123.123.123:8080/wpad.dat).
     - For macOS: open System Preferences -> Network, click on Wi-Fi, hit Advanced..., and under Proxies check SOCKS Proxy and set the host:port to the SOCKS Address as displayed in Pythonista (this will be of the form 123.123.123.123:9876).
