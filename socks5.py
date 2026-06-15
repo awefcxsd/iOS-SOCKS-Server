@@ -288,7 +288,14 @@ if __name__ == "__main__":
 
     if background_audio_enabled:
         audio_mode = "440 Hz test tone" if BACKGROUND_AUDIO_TEST_TONE else "silence"
-        initial_output += "Background audio keep-alive enabled ({})\n".format(audio_mode)
+        session_mode = (
+            "native playback session"
+            if background_audio.native_session_active
+            else "Pythonista player only"
+        )
+        initial_output += "Background audio enabled ({}, {})\n".format(
+            audio_mode, session_mode
+        )
     elif KEEP_ALIVE_WITH_AUDIO:
         initial_output += "Background audio keep-alive unavailable: {}\n".format(
             background_audio.error

@@ -15,7 +15,26 @@ class BackgroundAudio:
             os.path.dirname(os.path.abspath(__file__)), filename
         )
         self.player = None
+        self.audio_session = None
+        self.native_session_active = False
+        self.session_error = None
         self.error = None
+
+    def _activate_native_audio_session(self):
+        try:
+            from objc_util import ObjCClass
+
+            audio_session_class = ObjCClass("AVAudioSession")
+            self.audio_session = audio_session_class.sharedInstance()
+            self.audio_session.setCategory_error_("AVAudioSessionCategoryPlayback", None)
+            self.audio_session.setActive_error_(True, None)
+            self.native_session_active = True
+            return True
+        except Exception as error:
+            self.session_error = error
+            self.audio_session = None
+            self.native_session_active = False
+            return False
 
     def _create_audio_file(self):
         if os.path.exists(self.audio_path):
@@ -45,7 +64,10 @@ class BackgroundAudio:
         try:
             import sound
             self._create_audio_file()
+            self._activate_native_audio_session()
             self.player = sound.Player(self.audio_path)
+            # Player construction may change the shared session configuration.
+            self._activate_native_audio_session()
             self.player.number_of_loops = -1
             self.player.play()
         except Exception as error:
@@ -59,3 +81,7 @@ class BackgroundAudio:
         if self.player is not None:
             self.player.stop()
             self.player = None
+        if self.native_session_active:
+            self.audio_session.setActive_error_(False, None)
+            self.native_session_active = False
+            self.audio_session = None
