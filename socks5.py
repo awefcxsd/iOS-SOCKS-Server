@@ -44,6 +44,8 @@ EXIT_ON_WIFI_DISCONNECT = True
 WIFI_NETWORK_NAME = "Subaru_5G"
 WIFI_CHECK_INTERVAL = 2
 WIFI_DISCONNECT_CHECKS = 3
+IFF_UP = 0x1
+IFF_RUNNING = 0x40
 
 # Try to keep the screen from turning off (iOS)
 try:
@@ -256,6 +258,8 @@ def wifi_connection_is_active(interface_name, interface_address):
             and iface.addr
             and iface.addr.family == socket.AF_INET
             and iface.addr.address == interface_address
+            and iface.flags & IFF_UP
+            and iface.flags & IFF_RUNNING
             for iface in ifaddrs.get_interfaces()
         )
     except Exception as e:
@@ -263,20 +267,21 @@ def wifi_connection_is_active(interface_name, interface_address):
         return True
 
 
-async def wait_for_wifi_disconnect(interface_name, interface_address):
+def monitor_wifi_connection(
+    interface_name,
+    interface_address,
+    stop_event,
+    on_disconnect,
+):
     missed_checks = 0
-    while missed_checks < WIFI_DISCONNECT_CHECKS:
-        await asyncio.sleep(WIFI_CHECK_INTERVAL)
+    while not stop_event.wait(WIFI_CHECK_INTERVAL):
         if wifi_connection_is_active(interface_name, interface_address):
             missed_checks = 0
         else:
             missed_checks += 1
-
-    print(
-        "WiFi network {} disconnected; shutting down server.".format(
-            WIFI_NETWORK_NAME
-        )
-    )
+            if missed_checks >= WIFI_DISCONNECT_CHECKS:
+                on_disconnect()
+                return
 
 
 def create_wpad_server(hhost, hport, phost, pport):
@@ -392,8 +397,6 @@ if __name__ == "__main__":
             connect_host_ipv4=CONNECT_HOST_IPV4,
             connect_host_ipv6=CONNECT_HOST_IPV6,
         )
-        tasks = [asyncio.create_task(socks_server.run())]
-
         http_server = AsyncProxyServer(
             AsyncHTTPProxyHandler,
             listen_hosts=LISTEN_HOST,
@@ -403,32 +406,48 @@ if __name__ == "__main__":
             connect_host_ipv4=CONNECT_HOST_IPV4,
             connect_host_ipv6=CONNECT_HOST_IPV6,
         )
-        tasks.append(asyncio.create_task(http_server.run()))
-        tasks.append(asyncio.create_task(stats.render_forever()))
-
-        wifi_monitor = None
+        await asyncio.gather(socks_server.start(), http_server.start())
+        stats_task = asyncio.create_task(stats.render_forever())
+        shutdown_event = asyncio.Event()
+        monitor_stop_event = threading.Event()
+        monitor_thread = None
         if (
             EXIT_ON_WIFI_DISCONNECT
             and wifi_interface_name
             and wifi_interface_address
         ):
-            wifi_monitor = asyncio.create_task(
-                wait_for_wifi_disconnect(
+            loop = asyncio.get_running_loop()
+
+            def request_wifi_shutdown():
+                loop.call_soon_threadsafe(shutdown_event.set)
+
+            monitor_thread = threading.Thread(
+                target=monitor_wifi_connection,
+                args=(
                     wifi_interface_name,
                     wifi_interface_address,
-                )
+                    monitor_stop_event,
+                    request_wifi_shutdown,
+                ),
+                name="wifi-disconnect-monitor",
+                daemon=True,
             )
-            tasks.append(wifi_monitor)
+            monitor_thread.start()
 
         try:
-            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            if wifi_monitor not in done:
-                for task in done:
-                    await task
+            await shutdown_event.wait()
+            print(
+                "WiFi network {} disconnected; shutting down server.".format(
+                    WIFI_NETWORK_NAME
+                )
+            )
         finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            monitor_stop_event.set()
+            await asyncio.gather(socks_server.close(), http_server.close())
+            stats_task.cancel()
+            await asyncio.gather(stats_task, return_exceptions=True)
+            if monitor_thread is not None:
+                monitor_thread.join(timeout=WIFI_CHECK_INTERVAL + 1)
 
     try:
         asyncio.run(main())
@@ -436,4 +455,6 @@ if __name__ == "__main__":
         print("Shutting down.")
     finally:
         wpad_server.shutdown()
+        wpad_server.server_close()
+        thread.join(timeout=2)
         background_audio.stop()

@@ -50,6 +50,9 @@ A simple HTTP/SOCKS proxy designed to run on Pythonista on iOS, letting you fake
   SSID without an iOS entitlement. This behavior is configured by the
   `EXIT_ON_WIFI_DISCONNECT`, `WIFI_NETWORK_NAME`, `WIFI_CHECK_INTERVAL`, and
   `WIFI_DISCONNECT_CHECKS` constants in `socks5.py`.
+  Wi-Fi checks run on a synchronous monitor thread so they continue while Pyto
+  is in the background. Shutdown explicitly closes the SOCKS, HTTP, and WPAD
+  listening sockets before ending the background task.
 - Point your devices at the PAC URL (also called script URL, script address, etc.), or configure them to use the SOCKS proxy listed.
     - For iOS devices: open Settings, tap on Wi-Fi, tap on the (i) icon next to the network, scroll down to HTTP Proxy, tap on Configure Proxy, select Automatic, and enter the PAC URL as displayed in Pythonista in the URL field (the URL will look like http://123.123.123.123:8080/wpad.dat).
     - For macOS: open System Preferences -> Network, click on Wi-Fi, hit Advanced..., and under Proxies check SOCKS Proxy and set the host:port to the SOCKS Address as displayed in Pythonista (this will be of the form 123.123.123.123:9876).

@@ -109,6 +109,7 @@ class AsyncProxyServer:
         self.resolver = resolver or Resolver()
         self.connect_host_ipv4 = connect_host_ipv4
         self.connect_host_ipv6 = connect_host_ipv6
+        self.server: asyncio.Server | None = None
         self.resolver_source: str | None = None
         if self.connect_host_ipv4 is not None or self.connect_host_ipv6 is not None:
             resolver_afs = [af_for_address(ns) for ns in self.resolver.nameservers]
@@ -135,14 +136,28 @@ class AsyncProxyServer:
             else:
                 raise Exception("Resolver does not have any suitable nameservers!")
 
-    async def run(self) -> None:
-        server = await asyncio.start_server(
+    async def start(self) -> None:
+        self.server = await asyncio.start_server(
             self.client_connected,
             host=self.listen_hosts,
             port=self.listen_port,
             reuse_address=True,
         )
-        await server.serve_forever()
+
+    async def run(self) -> None:
+        await self.start()
+        try:
+            await self.server.serve_forever()
+        finally:
+            await self.close()
+
+    async def close(self) -> None:
+        if self.server is None:
+            return
+        server = self.server
+        self.server = None
+        server.close()
+        await server.wait_closed()
 
     async def client_connected(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
