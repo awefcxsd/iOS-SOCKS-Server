@@ -146,6 +146,8 @@ try:
             None,
         )
         if iface:
+            wifi_interface_name = iface.name
+            wifi_interface_address = iface.addr.address
             initial_output = (
                 "Assuming proxy will be accessed over hotspot (%s) at %s\n"
                 % (iface.name, iface.addr.address)
@@ -273,12 +275,25 @@ def monitor_wifi_connection(
     stop_event,
     on_disconnect,
 ):
+    print(
+        "WiFi disconnect monitor started for {} at {}".format(
+            interface_name, interface_address
+        )
+    )
     missed_checks = 0
     while not stop_event.wait(WIFI_CHECK_INTERVAL):
         if wifi_connection_is_active(interface_name, interface_address):
             missed_checks = 0
         else:
             missed_checks += 1
+            print(
+                "WiFi disconnect check {}/{} failed for {} at {}".format(
+                    missed_checks,
+                    WIFI_DISCONNECT_CHECKS,
+                    interface_name,
+                    interface_address,
+                )
+            )
             if missed_checks >= WIFI_DISCONNECT_CHECKS:
                 on_disconnect()
                 return
@@ -381,7 +396,8 @@ if __name__ == "__main__":
             "at startup\n"
         )
     stats = StatusMonitor(initial_output)
-    logging.getLogger().addHandler(stats)
+    root_logger = logging.getLogger()
+    root_logger.addHandler(stats)
 
     thread = threading.Thread(target=run_wpad_server, args=(wpad_server,))
     thread.daemon = True
@@ -458,3 +474,5 @@ if __name__ == "__main__":
         wpad_server.server_close()
         thread.join(timeout=2)
         background_audio.stop()
+        root_logger.removeHandler(stats)
+        stats.close()

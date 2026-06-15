@@ -43,7 +43,7 @@ A simple HTTP/SOCKS proxy designed to run on Pythonista on iOS, letting you fake
 - Server shutdown bypasses Pyto's thread-interrupting `BackgroundTask.stop()`
   wrapper and stops its native task directly, allowing the proxy sockets and
   WPAD server to finish cleanup when Pyto's Stop button is pressed.
-- By default, the server watches the Wi-Fi interface and IPv4 address present
+- By default, the server watches the Wi-Fi or hotspot bridge interface and IPv4 address present
   at startup as `Subaru_5G`. If that connection disappears or changes for six
   seconds, the proxy, WPAD server, and background audio are stopped. Start the
   script while connected to `Subaru_5G`; Pyto cannot reliably read the actual
@@ -52,7 +52,8 @@ A simple HTTP/SOCKS proxy designed to run on Pythonista on iOS, letting you fake
   `WIFI_DISCONNECT_CHECKS` constants in `socks5.py`.
   Wi-Fi checks run on a synchronous monitor thread so they continue while Pyto
   is in the background. Shutdown explicitly closes the SOCKS, HTTP, and WPAD
-  listening sockets before ending the background task.
+  listening sockets before ending the background task. The monitor prints its
+  selected interface at startup and reports each failed disconnect check.
 - Point your devices at the PAC URL (also called script URL, script address, etc.), or configure them to use the SOCKS proxy listed.
     - For iOS devices: open Settings, tap on Wi-Fi, tap on the (i) icon next to the network, scroll down to HTTP Proxy, tap on Configure Proxy, select Automatic, and enter the PAC URL as displayed in Pythonista in the URL field (the URL will look like http://123.123.123.123:8080/wpad.dat).
     - For macOS: open System Preferences -> Network, click on Wi-Fi, hit Advanced..., and under Proxies check SOCKS Proxy and set the host:port to the SOCKS Address as displayed in Pythonista (this will be of the form 123.123.123.123:9876).
