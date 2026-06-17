@@ -27,6 +27,15 @@ HAPPY_EYEBALLS_DELAY = 0.05  # seconds
 CONNECT_TIMEOUT = 75  # seconds
 
 
+def normalize_socket_address(address: Sequence | None) -> SocketAddress | None:
+    """Return the host/port pair from a platform socket address tuple."""
+    if address is None:
+        return None
+    if len(address) < 2:
+        raise ValueError("socket address is missing host or port: %r" % (address,))
+    return address[0], address[1]
+
+
 async def forwarder_loop(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -170,20 +179,32 @@ class AsyncProxyServer:
             self.traffic_stats.remove_connection()
 
     async def ipv4_connect(self, address: SocketAddress) -> Connection:
+        address = normalize_socket_address(address)
         local_addr = (
             (self.connect_host_ipv4, 0) if self.connect_host_ipv4 is not None else None
         )
         return await asyncio.wait_for(
-            asyncio.open_connection(address[0], address[1], local_addr=local_addr),
+            asyncio.open_connection(
+                address[0],
+                address[1],
+                family=socket.AF_INET,
+                local_addr=local_addr,
+            ),
             timeout=CONNECT_TIMEOUT,
         )
 
     async def ipv6_connect(self, address: SocketAddress) -> Connection:
+        address = normalize_socket_address(address)
         local_addr = (
             (self.connect_host_ipv6, 0) if self.connect_host_ipv6 is not None else None
         )
         return await asyncio.wait_for(
-            asyncio.open_connection(address[0], address[1], local_addr=local_addr),
+            asyncio.open_connection(
+                address[0],
+                address[1],
+                family=socket.AF_INET6,
+                local_addr=local_addr,
+            ),
             timeout=CONNECT_TIMEOUT,
         )
 
@@ -262,6 +283,7 @@ class AsyncProxyServer:
     async def resolve_address(
         self, address_type: int, address: SocketAddress
     ) -> GenericAddress:
+        address = normalize_socket_address(address)
         if address_type == Socks5AddressType.IPV4:
             result = GenericAddress(ipv4=address)
         elif address_type == Socks5AddressType.DOMAIN:

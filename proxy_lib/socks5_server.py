@@ -17,6 +17,7 @@ from .proxy_server import (
     AsyncProxyServer,
     SocketAddress,
     Socks5AddressType,
+    normalize_socket_address,
 )
 
 logger = logging.getLogger("socks5")
@@ -42,7 +43,7 @@ def encode_address(sockaddr: SocketAddress | None = None) -> bytes:
     if sockaddr is None:
         return struct.pack("!BIH", Socks5AddressType.IPV4, 0, 0)
 
-    address, port = sockaddr
+    address, port = normalize_socket_address(sockaddr)
     try:
         addrbytes = socket.inet_pton(socket.AF_INET, address)
         return struct.pack("!B4sH", Socks5AddressType.IPV4, addrbytes, port)
@@ -66,7 +67,9 @@ class UdpForwarderProtocol(asyncio.DatagramProtocol):
         self.transport = transport
 
     def datagram_received(self, data: bytes, addr: SocketAddress) -> None:
-        self.loop.create_task(self.method(self.transport, data, addr[:2]))
+        self.loop.create_task(
+            self.method(self.transport, data, normalize_socket_address(addr))
+        )
 
 
 class UdpForwarder:
@@ -82,8 +85,10 @@ class UdpForwarder:
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
+        client_family = socket.AF_INET6 if ":" in self.local_address else socket.AF_INET
         self.client_conn, _ = await loop.create_datagram_endpoint(
             lambda: UdpForwarderProtocol(self.on_client_datagram),
+            family=client_family,
             local_addr=(self.local_address, 0),
         )
 
@@ -97,12 +102,14 @@ class UdpForwarder:
         if connect_host_ipv4 is not None:
             self.server_conn_ipv4, _ = await loop.create_datagram_endpoint(
                 lambda: UdpForwarderProtocol(self.on_server_datagram),
+                family=socket.AF_INET,
                 local_addr=(connect_host_ipv4, 0),
             )
 
         if connect_host_ipv6 is not None:
             self.server_conn_ipv6, _ = await loop.create_datagram_endpoint(
                 lambda: UdpForwarderProtocol(self.on_server_datagram),
+                family=socket.AF_INET6,
                 local_addr=(connect_host_ipv6, 0),
             )
 
@@ -112,6 +119,7 @@ class UdpForwarder:
         data: bytes,
         client_addr: SocketAddress,
     ) -> None:
+        client_addr = normalize_socket_address(client_addr)
         sockfile = BytesIO(data)
         try:
             # decode header
@@ -139,6 +147,7 @@ class UdpForwarder:
     async def on_server_datagram(
         self, transport: asyncio.DatagramTransport, data: bytes, addr: SocketAddress
     ) -> None:
+        addr = normalize_socket_address(addr)
         self.server.traffic_stats.add_inbound(len(data))
 
         client_addr = self.connections.get((transport, addr), None)
@@ -231,7 +240,9 @@ class AsyncSocks5Handler(AsyncProxyHandler):
         elif cmd == 3:  # UDP ASSOCIATE
             # ignore the request host: the client might not actually know
             # its own address
-            client_address = self.writer.get_extra_info("peername")
+            client_address = normalize_socket_address(
+                self.writer.get_extra_info("peername")
+            )
             if client_address:
                 address = (client_address[0], address[1])
             await self.handle_udp(address)
@@ -276,7 +287,10 @@ class AsyncSocks5Handler(AsyncProxyHandler):
         await self.tcp_forward(connection)
 
     async def handle_udp(self, client_address: SocketAddress) -> None:
-        csock_addr = self.writer.get_extra_info("sockname")[0]
+        sock_address = normalize_socket_address(self.writer.get_extra_info("sockname"))
+        if sock_address is None:
+            raise Exception("Could not determine local UDP bind address")
+        csock_addr = sock_address[0]
 
         # TODO: restrict incoming packets to client address
         try:
@@ -286,7 +300,12 @@ class AsyncSocks5Handler(AsyncProxyHandler):
             self.send_reply(Socks5Status.ERROR)
             raise e
 
-        csock_port = udp_forwarder.client_conn.get_extra_info("sockname")[1]
+        udp_sock_address = normalize_socket_address(
+            udp_forwarder.client_conn.get_extra_info("sockname")
+        )
+        if udp_sock_address is None:
+            raise Exception("Could not determine UDP relay address")
+        csock_port = udp_sock_address[1]
 
         self.send_reply(Socks5Status.SUCCEEDED, (csock_addr, csock_port))
         try:

@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.ERROR)
 # IP over which the proxy will be available (probably WiFi IP)
 PROXY_HOST = "172.20.10.1"
 # IP over which the proxy will attempt to connect to the Internet
-CONNECT_HOST_IPV4 = "0.0.0.0"
+CONNECT_HOST_IPV4 = None
 CONNECT_HOST_IPV6 = None
 # Time out connections after being idle for this long (in seconds)
 IDLE_TIMEOUT = 1800
@@ -46,6 +46,9 @@ WIFI_CHECK_INTERVAL = 2
 WIFI_DISCONNECT_CHECKS = 3
 IFF_UP = 0x1
 IFF_RUNNING = 0x40
+CONNECTIVITY_TEST_TIMEOUT = 5
+IPV4_TEST_ADDRESS = ("1.1.1.1", 80)
+IPV6_TEST_ADDRESS = ("2606:4700:4700::1111", 80)
 
 # Try to keep the screen from turning off (iOS)
 try:
@@ -72,6 +75,20 @@ def is_globally_routable(ipv6_address):
         if ipaddress.ip_address(ipv6_address) in ipaddress.ip_network(network):
             return False
     return True
+
+
+def test_tcp_connectivity(family, source_address, target_address):
+    test_socket = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        test_socket.settimeout(CONNECTIVITY_TEST_TIMEOUT)
+        if source_address:
+            test_socket.bind((source_address, 0))
+        test_socket.connect(target_address)
+        return None
+    except Exception as e:
+        return e
+    finally:
+        test_socket.close()
 
 
 DEFAULT_RESOLVERS = [
@@ -182,11 +199,33 @@ try:
 
         if iface_ipv4:
             iface_ipv4.addr.address
-            ipv4_output += "Will connect to IPv4 servers over interface %s at %s\n" % (
-                iface_ipv4.name,
+            ipv4_error = test_tcp_connectivity(
+                socket.AF_INET,
                 iface_ipv4.addr.address,
+                IPV4_TEST_ADDRESS,
             )
-            CONNECT_HOST_IPV4 = iface_ipv4.addr.address
+            if ipv4_error is None:
+                ipv4_output += (
+                    "Will connect to IPv4 servers over interface %s at %s\n"
+                    % (
+                        iface_ipv4.name,
+                        iface_ipv4.addr.address,
+                    )
+                )
+                CONNECT_HOST_IPV4 = iface_ipv4.addr.address
+            else:
+                ipv4_output += (
+                    "Failed to connect to %s:%d over IPv4 interface %s at %s due to: %s\n"
+                    "Will connect to IPv4 servers using the system default route\n"
+                    % (
+                        IPV4_TEST_ADDRESS[0],
+                        IPV4_TEST_ADDRESS[1],
+                        iface_ipv4.name,
+                        iface_ipv4.addr.address,
+                        ipv4_error,
+                    )
+                )
+                CONNECT_HOST_IPV4 = None
 
             # Create a list of all IPv6 addresse that are globally routable and match the IPv4 interface
             iface_ipv6_list = [
@@ -221,21 +260,19 @@ try:
                 iface_ipv6.addr.address,
             )
             # Test IPv6 connectivity
-            try:
-                test_socket = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-                test_socket.settimeout(5)
-                test_socket.bind((iface_ipv6.addr.address, 0))
-                test_socket.connect(("2606:4700:4700::1111", 80))
-                test_socket.close()
+            ipv6_error = test_tcp_connectivity(
+                socket.AF_INET6,
+                iface_ipv6.addr.address,
+                IPV6_TEST_ADDRESS,
+            )
+            if ipv6_error is None:
                 CONNECT_HOST_IPV6 = iface_ipv6.addr.address
-            except Exception as e:
+            else:
                 ipv6_output += (
-                    "Failed to connect to 2606:4700:4700::1111 over IPv6 due to: %s\n"
-                    % str(e)
+                    "Failed to connect to %s:%d over IPv6 due to: %s\n"
+                    % (IPV6_TEST_ADDRESS[0], IPV6_TEST_ADDRESS[1], ipv6_error)
                 )
                 CONNECT_HOST_IPV6 = None
-            finally:
-                test_socket.close()
 
     initial_output += ipv4_output + ipv6_output
     print(initial_output)
