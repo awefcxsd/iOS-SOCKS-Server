@@ -35,7 +35,7 @@ SOCKS_PORT = 9876
 HTTP_PORT = 9877
 WPAD_PORT = 8088
 
-USE_PHONE_VPN = True
+USE_PHONE_VPN = False
 CUSTOM_RESOLVERS = []
 # Loop silent audio while running so Pythonista can continue executing after
 # iOS sends it to the background. iOS may still suspend or terminate the app.
@@ -46,7 +46,7 @@ BACKGROUND_AUDIO_TEST_TONE = False
 # Stop the server when the WiFi connection used at startup goes away. iOS does
 # not reliably expose the SSID to Pyto, so this name is a label for the network
 # that must be connected when the script starts.
-EXIT_ON_WIFI_DISCONNECT = True
+EXIT_ON_WIFI_DISCONNECT = False
 WIFI_NETWORK_NAME = "Subaru_5G"
 WIFI_CHECK_INTERVAL = 2
 WIFI_DISCONNECT_CHECKS = 3
