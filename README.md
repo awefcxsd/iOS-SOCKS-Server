@@ -78,6 +78,39 @@ While it's easiest to use this with websites, it's actually possible to tunnel a
 
 # Troubleshooting
 
+## Clients connect but cannot access the internet
+
+While the failure is happening, run `diagnose_network.py` in Pyto before
+rebooting. It compares HTTPS using system DNS and the default route with direct
+TCP and public DNS probes, both unbound and bound to cellular/VPN addresses.
+Individual probes can fail because a destination is blocked; compare the
+results rather than treating a single failure as proof the network is down.
+
+- If default-route HTTPS passes but TCP bound to the interface shown by the
+  proxy fails, try `USE_SYSTEM_DEFAULT_ROUTE = True` in `socks5.py`, then rerun
+  the proxy. This disables automatic source binding. The default route may use
+  Wi-Fi rather than cellular, so this option is suitable only when that route
+  provides the internet access you need.
+- If TCP passes but public DNS probes fail, the proxy's DNS path may be blocked.
+  Set `CUSTOM_RESOLVERS` to DNS server IPs reachable through your cellular/VPN
+  connection, then rerun. The proxy uses its own public DNS servers rather than
+  Safari's system DNS; Safari working does not establish that this DNS path works.
+- If a VPN is active, reconnect it and rerun the proxy. To test cellular without
+  a VPN, disconnect the VPN and set `USE_PHONE_VPN = False`. Changing this flag
+  alone does not disable iOS VPN routing or an always-on VPN policy.
+- Check whether the script printed a Wi-Fi disconnect shutdown message. Its
+  monitor deliberately stops the proxy when the startup Wi-Fi/hotspot address
+  disappears or changes. Reconnect and rerun the script; check the displayed PAC
+  URL if the phone's Wi-Fi address changed.
+
+The proxy refreshes automatically selected source addresses before new TCP
+connections and UDP destination lookups. DNS source binding is refreshed at the
+same time. If the selected interface disappears entirely, requests fail with an
+explicit error until it returns; rerun the script if iOS assigns a different
+interface name. Existing TCP connections and UDP associations still need to be
+reopened after a network change. HTTP client sockets now close on error paths
+as well as successful requests.
+
 ## Doesn't work with an ad-hoc network on macOS
 
 macOS appears to incorrectly assess the Internet as unreachable with an ad-hoc network, even if a proxy is configured. A workaround for this, tested on macOS 10.14, is described under [issue #1](https://github.com/nneonneo/iOS-SOCKS-Server/issues/1#issuecomment-583989079).

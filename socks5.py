@@ -21,6 +21,11 @@ PROXY_HOST = "172.20.10.1"
 # IP over which the proxy will attempt to connect to the Internet
 CONNECT_HOST_IPV4 = None
 CONNECT_HOST_IPV6 = None
+# Use iOS routing directly instead of automatically binding cellular/VPN IPs.
+# Useful when default-route HTTPS works but a bound route fails in diagnostics.
+USE_SYSTEM_DEFAULT_ROUTE = False
+# Refresh automatically selected cellular/VPN addresses before new requests.
+REFRESH_SOURCE_ADDRESSES = True
 # Time out connections after being idle for this long (in seconds)
 IDLE_TIMEOUT = 1800
 
@@ -127,6 +132,8 @@ try:
     ipv6_output = ""
     wifi_interface_name = None
     wifi_interface_address = None
+    connect_interface_ipv4 = None
+    connect_interface_ipv6 = None
 
     interfaces = ifaddrs.get_interfaces()
     iftypes = defaultdict(list)
@@ -188,7 +195,10 @@ try:
             "Warning: could not get WiFi address; assuming %s\n" % PROXY_HOST
         )
 
-    if iftypes["cell"]:
+    if USE_SYSTEM_DEFAULT_ROUTE:
+        CONNECT_HOST_IPV4 = CONNECT_HOST_IPV6 = None
+        ipv4_output += "Will use the system default route (source binding disabled)\n"
+    elif iftypes["cell"]:
         iface_ipv4 = next(
             (iface for iface in iftypes["cell"] if iface.addr.family == socket.AF_INET),
             None,
@@ -213,6 +223,7 @@ try:
                     )
                 )
                 CONNECT_HOST_IPV4 = iface_ipv4.addr.address
+                connect_interface_ipv4 = iface_ipv4.name
             else:
                 ipv4_output += (
                     "Failed to connect to %s:%d over IPv4 interface %s at %s due to: %s\n"
@@ -267,6 +278,7 @@ try:
             )
             if ipv6_error is None:
                 CONNECT_HOST_IPV6 = iface_ipv6.addr.address
+                connect_interface_ipv6 = iface_ipv6.name
             else:
                 ipv6_output += (
                     "Failed to connect to %s:%d over IPv6 due to: %s\n"
@@ -277,7 +289,7 @@ try:
     initial_output += ipv4_output + ipv6_output
     print(initial_output)
 except Exception as e:
-    logging.error("Address detection failed: %s: %s", (type(e).__name__, e))
+    logging.error("Address detection failed: %s: %s", type(e).__name__, e)
     import traceback
 
     traceback.print_exc()
@@ -285,6 +297,44 @@ except Exception as e:
     interfaces = None
     wifi_interface_name = None
     wifi_interface_address = None
+    connect_interface_ipv4 = None
+    connect_interface_ipv6 = None
+
+
+def current_source_addresses():
+    """Refresh selected interfaces without silently changing the outbound route."""
+    from proxy_lib import ifaddrs
+
+    active_interfaces = [
+        iface for iface in ifaddrs.get_interfaces()
+        if iface.addr and iface.flags & IFF_UP and iface.flags & IFF_RUNNING
+    ]
+
+    def address_for(interface_name, family, configured_address):
+        if interface_name is None:
+            return configured_address
+        addresses = [
+            iface.addr.address for iface in active_interfaces
+            if iface.name == interface_name and iface.addr.family == family
+            and (family != socket.AF_INET6 or interface_name.startswith("utun")
+                 or is_globally_routable(iface.addr.address))
+        ]
+        if configured_address in addresses:
+            return configured_address
+        if not addresses:
+            return None
+        return addresses[-1] if family == socket.AF_INET6 else addresses[0]
+
+    addresses = (
+        address_for(connect_interface_ipv4, socket.AF_INET, CONNECT_HOST_IPV4),
+        address_for(connect_interface_ipv6, socket.AF_INET6, CONNECT_HOST_IPV6),
+    )
+    if addresses == (None, None):
+        raise OSError(
+            "Selected outbound interfaces have no active addresses; "
+            "reconnect cellular/VPN or rerun the script if the interface changed"
+        )
+    return addresses
 
 
 def wifi_connection_is_active(interface_name, interface_address):
@@ -441,6 +491,12 @@ if __name__ == "__main__":
     thread.start()
 
     async def main():
+        source_address_provider = (
+            current_source_addresses
+            if REFRESH_SOURCE_ADDRESSES
+            and (connect_interface_ipv4 or connect_interface_ipv6)
+            else None
+        )
         socks_server = AsyncProxyServer(
             AsyncSocks5Handler,
             listen_hosts=LISTEN_HOST,
@@ -449,6 +505,7 @@ if __name__ == "__main__":
             resolver=resolver,
             connect_host_ipv4=CONNECT_HOST_IPV4,
             connect_host_ipv6=CONNECT_HOST_IPV6,
+            source_address_provider=source_address_provider,
         )
         http_server = AsyncProxyServer(
             AsyncHTTPProxyHandler,
@@ -458,6 +515,7 @@ if __name__ == "__main__":
             resolver=resolver,
             connect_host_ipv4=CONNECT_HOST_IPV4,
             connect_host_ipv6=CONNECT_HOST_IPV6,
+            source_address_provider=source_address_provider,
         )
         await asyncio.gather(socks_server.start(), http_server.start())
         stats_task = asyncio.create_task(stats.render_forever())

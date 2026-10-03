@@ -1,6 +1,8 @@
 """ General base class for proxies """
 
 import asyncio
+import copy
+import logging
 import random
 import socket
 from asyncio.staggered import staggered_race
@@ -25,6 +27,15 @@ class GenericAddress:
 
 HAPPY_EYEBALLS_DELAY = 0.05  # seconds
 CONNECT_TIMEOUT = 75  # seconds
+CLOSE_TIMEOUT = 5  # seconds
+
+
+async def close_writer(writer: asyncio.StreamWriter) -> None:
+    writer.close()
+    try:
+        await asyncio.wait_for(writer.wait_closed(), timeout=CLOSE_TIMEOUT)
+    except (OSError, asyncio.TimeoutError):
+        writer.transport.abort()
 
 
 def normalize_socket_address(address: Sequence | None) -> SocketAddress | None:
@@ -50,8 +61,7 @@ async def forwarder_loop(
             writer.write(buf)
             await writer.drain()
     finally:
-        writer.close()
-        await writer.wait_closed()
+        await close_writer(writer)
 
 
 # XXX: should make this a more generic address type enum and convert from socks5
@@ -110,16 +120,24 @@ class AsyncProxyServer:
         resolver: Resolver | None = None,
         connect_host_ipv4: str | None = None,
         connect_host_ipv6: str | None = None,
+        source_address_provider: Callable[[], tuple[str | None, str | None]] | None = None,
     ):
         self.handler_class = handler_class
         self.listen_hosts = listen_hosts
         self.listen_port = listen_port
         self.traffic_stats = traffic_stats or status.SimpleTrafficStats()
-        self.resolver = resolver or Resolver()
+        # Each listener needs its own nameserver list when source families change.
+        self.resolver = copy.copy(resolver) if resolver is not None else Resolver()
+        self._nameservers = list(self.resolver.nameservers)
+        self.source_address_provider = source_address_provider
         self.connect_host_ipv4 = connect_host_ipv4
         self.connect_host_ipv6 = connect_host_ipv6
         self.server: asyncio.Server | None = None
+        self._configure_resolver_source()
+
+    def _configure_resolver_source(self) -> None:
         self.resolver_source: str | None = None
+        self.resolver.nameservers = list(self._nameservers)
         if self.connect_host_ipv4 is not None or self.connect_host_ipv6 is not None:
             resolver_afs = [af_for_address(ns) for ns in self.resolver.nameservers]
             if (
@@ -144,6 +162,25 @@ class AsyncProxyServer:
                 ]
             else:
                 raise Exception("Resolver does not have any suitable nameservers!")
+
+    def refresh_source_addresses(self) -> None:
+        if self.source_address_provider is None:
+            return
+        ipv4, ipv6 = self.source_address_provider()
+        if (ipv4, ipv6) == (self.connect_host_ipv4, self.connect_host_ipv6):
+            return
+        previous = self.connect_host_ipv4, self.connect_host_ipv6
+        self.connect_host_ipv4, self.connect_host_ipv6 = ipv4, ipv6
+        try:
+            self._configure_resolver_source()
+        except Exception:
+            self.connect_host_ipv4, self.connect_host_ipv6 = previous
+            self._configure_resolver_source()
+            raise
+        logging.warning(
+            "Proxy source addresses changed: IPv4 %s -> %s, IPv6 %s -> %s",
+            previous[0], ipv4, previous[1], ipv6,
+        )
 
     async def start(self) -> None:
         self.server = await asyncio.start_server(
@@ -177,6 +214,7 @@ class AsyncProxyServer:
             await handler.handle()
         finally:
             self.traffic_stats.remove_connection()
+            await close_writer(writer)
 
     async def ipv4_connect(self, address: SocketAddress) -> Connection:
         address = normalize_socket_address(address)
@@ -278,11 +316,17 @@ class AsyncProxyServer:
             result.ipv4 = (random.choice(ipv4).address, port)
         if not isinstance(ipv6, BaseException) and ipv6:
             result.ipv6 = (random.choice(ipv6).address, port)
+        if result.ipv4 is None and result.ipv6 is None:
+            raise OSError(
+                "DNS lookup failed for %s (source %s): A: %s; AAAA: %s"
+                % (domain, self.resolver_source or "system default", ipv4, ipv6)
+            )
         return result
 
     async def resolve_address(
         self, address_type: int, address: SocketAddress
     ) -> GenericAddress:
+        self.refresh_source_addresses()
         address = normalize_socket_address(address)
         if address_type == Socks5AddressType.IPV4:
             result = GenericAddress(ipv4=address)
