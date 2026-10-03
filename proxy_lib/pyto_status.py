@@ -39,11 +39,12 @@ def display_state(snapshot, now=None):
 
 class PytoStatusPublisher:
     def __init__(self, host, socks_port, http_port, wpad_port,
-                 notifications_enabled=True, widget_enabled=True):
+                 notifications_enabled=True, widget_enabled=True, widget_publisher=None):
         self.notifications_enabled = notifications_enabled
         self.widget_enabled = widget_enabled
         self.storage_enabled = widget_enabled
-        self.widget_publisher = InAppWidgetPublisher(enabled=widget_enabled)
+        self.widget_publisher = (widget_publisher if widget_publisher is not None
+                                 else InAppWidgetPublisher(enabled=widget_enabled))
         self.snapshot = {
             "state": "starting", "reason": "Starting proxy",
             "host": host, "socks_port": socks_port, "http_port": http_port,
@@ -54,12 +55,12 @@ class PytoStatusPublisher:
         self.finished = False
         self.last_publish = 0
 
-    def _publish(self):
+    def _publish(self, final=False):
         self.snapshot["updated_at"] = time.time()
         self.last_publish = time.monotonic()
         if not self.widget_enabled:
             return
-        self.widget_publisher.submit(self.snapshot, final=self.finished)
+        self.widget_publisher.submit(self.snapshot, final=final)
         if not self.storage_enabled:
             return
         try:
@@ -112,7 +113,7 @@ class PytoStatusPublisher:
         self.snapshot.update(stats.snapshot())
         self._publish()
 
-    def finish(self, reason="Stopped by user", failed=False, stats=None):
+    def finish(self, reason="Stopped by user", failed=False, stats=None, restarting=False):
         # Several cleanup paths run for a single shutdown; notify only once.
         if self.finished:
             return
@@ -121,6 +122,7 @@ class PytoStatusPublisher:
             self.snapshot.update(stats.snapshot())
         self.snapshot.update(state="failed" if failed else "stopped", reason=reason,
                              connections=0, in_mbps=0, out_mbps=0)
-        self._publish()
-        self.widget_publisher.wait_closed()
+        self._publish(final=not restarting)
+        if not restarting:
+            self.widget_publisher.wait_closed()
         self._notify(f"Proxy {'failed' if failed else 'stopped'}\n{reason}")

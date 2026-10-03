@@ -9,8 +9,10 @@ from unittest.mock import Mock, patch
 
 from proxy_lib.pyto_control import CONTROL_KEY, PytoProxyControl
 from proxy_lib.pyto_widget import InAppWidgetPublisher
+from proxy_lib.pyto_status import HEARTBEAT_INTERVAL, PytoStatusPublisher
 import proxy_widget
 import stop
+import restart
 
 
 class LiveWidgetTests(unittest.TestCase):
@@ -43,14 +45,14 @@ class LiveWidgetTests(unittest.TestCase):
 
     def test_unavailable_or_wrong_token_does_not_use_cached_running_data(self):
         self.values["ios_socks_server.status.v1"] = {"state": "running", "connections": 99}
-        self.assertEqual(proxy_widget.read_live_status()["state"], "unavailable")
+        self.assertEqual(proxy_widget.read_live_status(retry_timeout=0)["state"], "unavailable")
         control = PytoProxyControl(Mock(), get_status=lambda: {"state": "running"})
         self.addCleanup(control.stop)
         self.assertTrue(control.start())
         self.values[CONTROL_KEY]["token"] = "0" * 48
-        self.assertEqual(proxy_widget.read_live_status()["state"], "unavailable")
+        self.assertEqual(proxy_widget.read_live_status(retry_timeout=0)["state"], "unavailable")
         control.stop()
-        self.assertEqual(proxy_widget.read_live_status()["state"], "unavailable")
+        self.assertEqual(proxy_widget.read_live_status(retry_timeout=0)["state"], "unavailable")
 
     def test_status_requests_remain_available_during_a_pending_shutdown(self):
         control = PytoProxyControl(Mock(), get_status=lambda: {"state": "running"})
@@ -109,8 +111,132 @@ class LiveWidgetTests(unittest.TestCase):
             with self.assertLogs(level="ERROR"):
                 failing.submit({"state": "running"}, final=True)
                 failing.wait_closed()
-        self.assertFalse(failing.enabled)
+        self.assertTrue(failing.enabled)
         self.assertFalse(failing.thread.is_alive())
+
+    def test_widget_survives_module_eviction_and_continues_publishing_after_restart(self):
+        wd = Mock()
+        wd.__PyWidget__ = Mock()
+        wd.__PyWidget__.alloc.return_value.init.side_effect = lambda: Mock()
+        first_saved = threading.Event()
+        stopped_saved = threading.Event()
+        replacement_saved = threading.Event()
+        updated_saved = threading.Event()
+        entries = []
+
+        def build(wd, data, date):
+            return SimpleNamespace(**{
+                size + "_layout": SimpleNamespace(__widget_view__=dict(data))
+                for size in ("small", "medium", "large")
+            })
+
+        def save(native, key):
+            data = native.addView.call_args_list[0].args[0]
+            entries.append(data)
+            if data["host"] == "first":
+                (first_saved if data["state"] == "running" else stopped_saved).set()
+            elif data["state"] == "running":
+                (updated_saved if data["connections"] == 3 else replacement_saved).set()
+
+        wd.__PyWidget__.addWidget.side_effect = save
+        worker = InAppWidgetPublisher()
+        with patch.dict(sys.modules, widgets=wd), patch("proxy_widget.build_widget", side_effect=build):
+            first = PytoStatusPublisher("first", 1, 2, 3, notifications_enabled=False,
+                                        widget_publisher=worker)
+            first.running()
+            self.assertTrue(first_saved.wait(2))
+            original_thread = worker.thread
+            first.finish("Restart requested", restarting=True)
+            self.assertTrue(stopped_saved.wait(2))
+            self.assertFalse(worker.finished)
+            # Pyto drops/reimports these modules when restart.py runs. Existing
+            # working bindings must stay in the retained worker, even if a new
+            # import would return incompatible UI classes.
+            with patch.dict(sys.modules, widgets=SimpleNamespace(), proxy_widget=SimpleNamespace()):
+                second = PytoStatusPublisher("second", 1, 2, 3, notifications_enabled=False,
+                                             widget_publisher=worker)
+                try:
+                    second.running()
+                    self.assertTrue(replacement_saved.wait(2))
+                    second.last_publish -= HEARTBEAT_INTERVAL
+                    second.update(SimpleNamespace(snapshot=lambda: {"connections": 3}))
+                    self.assertTrue(updated_saved.wait(2))
+                    self.assertIs(worker.thread, original_thread)
+                finally:
+                    second.finish("Stopped by user")
+        self.assertFalse(worker.thread.is_alive())
+        self.assertEqual(entries[-1]["host"], "second")
+        self.assertEqual(entries[-1]["state"], "stopped")
+
+    def test_live_lookup_rediscovers_replacement_control_after_restart_gap(self):
+        requested = threading.Event()
+        first_lookup = threading.Event()
+        gap = threading.Event()
+        completed = threading.Event()
+        old = PytoProxyControl(Mock(), requested.set,
+                               get_status=lambda: {"state": "running", "host": "old"})
+        new = PytoProxyControl(Mock(), get_status=lambda: {"state": "running", "host": "new"})
+        self.addCleanup(old.stop)
+        self.addCleanup(new.stop)
+        self.assertTrue(old.start())
+        old_token = self.values[CONTROL_KEY]["token"]
+
+        def replace():
+            if not requested.wait(2):
+                return
+            old.stop()
+            gap.set()
+            if first_lookup.wait(2):
+                new.start()
+                completed.set()
+
+        lifecycle = threading.Thread(target=replace, daemon=True)
+        lifecycle.start()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(restart.request_restart())
+        self.assertTrue(gap.wait(2))
+
+        def get(key):
+            if key == CONTROL_KEY and key not in self.values:
+                first_lookup.set()
+                raise KeyError(key)
+            return self.values[key]
+
+        self.storage.get.side_effect = get
+        data = proxy_widget.read_live_status(retry_timeout=2)
+        lifecycle.join(timeout=2)
+        self.assertTrue(completed.is_set())
+        self.assertEqual(data["state"], "running")
+        self.assertEqual(data["host"], "new")
+        self.assertNotEqual(self.values[CONTROL_KEY]["token"], old_token)
+
+    def test_render_error_is_retried_on_the_next_update(self):
+        failed = threading.Event()
+        wd = Mock()
+        wd.__PyWidget__ = Mock()
+        widget = SimpleNamespace(**{
+            size + "_layout": SimpleNamespace(__widget_view__=Mock())
+            for size in ("small", "medium", "large")
+        })
+        calls = []
+
+        def render(wd, data, date):
+            calls.append(data)
+            if len(calls) == 1:
+                failed.set()
+                raise RuntimeError("temporary bridge failure")
+            return widget
+
+        worker = InAppWidgetPublisher()
+        with patch.dict(sys.modules, widgets=wd), patch("proxy_widget.build_widget", side_effect=render):
+            with self.assertLogs(level="ERROR"):
+                worker.submit({"state": "running"})
+                self.assertTrue(failed.wait(2))
+                worker.submit({"state": "stopped"}, final=True)
+                worker.wait_closed()
+        self.assertTrue(worker.enabled)
+        self.assertFalse(worker.thread.is_alive())
+        wd.__PyWidget__.addWidget.assert_called_once()
 
 
 if __name__ == "__main__":

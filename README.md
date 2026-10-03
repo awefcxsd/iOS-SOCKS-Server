@@ -134,6 +134,11 @@ preview sheets. Tapping the widget opens `proxy_widget.py`, which reads the
 current counters through an authenticated `STATUS` request to the loopback
 control listener. Shared storage supplies only the listener port and token;
 the widget does not read the persisted traffic heartbeat.
+The widget worker remains active across `restart.py` requests, retaining its
+working Pyto UI bindings even when Pyto clears imported script modules.
+Live lookups retry for up to five seconds while restart replaces the control
+listener and token. Temporary rendering errors are logged and retried on the
+next update rather than permanently disabling the widget.
 
 The In App widget uses native text/layout elements rather than a bitmap
 snapshot or precomputed running/stale timeline. iOS still controls Home Screen

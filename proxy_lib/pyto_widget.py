@@ -40,8 +40,13 @@ class InAppWidgetPublisher:
         try:
             import widgets as wd
             from proxy_widget import WIDGET_KEY, build_widget
-            while True:
-                data, final = self.jobs.get()
+        except ImportError:
+            self.enabled = False
+            return
+        last_error = None
+        while True:
+            data, final = self.jobs.get()
+            try:
                 widget = build_widget(wd, data, datetime.now())
                 # Pyto's public save_widget also presents a preview. Use its
                 # native save operation directly for automatic server updates,
@@ -53,13 +58,16 @@ class InAppWidgetPublisher:
                                                   widget.large_layout)):
                     native_widget.addView(layout.__widget_view__, family=family)
                 native_type.addWidget(native_widget, key=WIDGET_KEY)
-                if final:
-                    return
-        except ImportError:
-            self.enabled = False
-        except Exception as error:
-            self.enabled = False
-            logging.error("Could not update Pyto In App widget: %s", error)
+                last_error = None
+            except Exception as error:
+                # A transient bridge/render error must not permanently stop
+                # publishing. The next heartbeat rebuilds the native layouts.
+                message = "{}: {}".format(type(error).__name__, error)
+                if message != last_error:
+                    logging.exception("Could not update Pyto In App widget: %s", message)
+                last_error = message
+            if final:
+                return
 
     def wait_closed(self):
         """Give the final stopped entry a chance to save before a restart."""

@@ -143,7 +143,7 @@ class PytoStatusTests(unittest.TestCase):
         wd.link = None
         wd.TimelineProvider = object
         wd.Widget.side_effect = lambda: Mock()
-        with patch.dict(sys.modules, widgets=wd):
+        with patch.dict(sys.modules, widgets=wd), patch("time.sleep"), patch("time.monotonic", side_effect=range(0, 100, 10)):
             namespace = runpy.run_path(proxy_widget.__file__)
             self.assertEqual(namespace["__name__"], "<run_path>")
             wd.save_widget.assert_called_once()
@@ -238,6 +238,7 @@ class PytoStatusTests(unittest.TestCase):
             BackgroundAudio=Mock(), PytoStopWatcher=watcher_factory,
             PytoStatusPublisher=PytoStatusPublisher, cleanup_steps=cleanup_steps,
             PytoProxyControl=control_factory,
+            InAppWidgetPublisher=Mock(),
             create_wpad_server=Mock(), stop_wpad_server=Mock(),
             run_wpad_server=Mock(), service_thread=make_thread,
             run_until_stopped=run_until, StatusMonitor=StatusMonitor,

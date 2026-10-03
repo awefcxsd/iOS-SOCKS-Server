@@ -17,6 +17,7 @@ from proxy_lib.socks5_server import AsyncSocks5Handler
 from proxy_lib.status import StatusMonitor
 from proxy_lib.pyto_status import PytoStatusPublisher
 from proxy_lib.pyto_control import PytoProxyControl
+from proxy_lib.pyto_widget import InAppWidgetPublisher
 
 logging.basicConfig(level=logging.ERROR)
 
@@ -376,7 +377,7 @@ def run_wpad_server(server):
         pass
 
 
-def run():
+def run(widget_publisher=None):
     global initial_output
     background_audio = BackgroundAudio(test_tone=BACKGROUND_AUDIO_TEST_TONE)
     wpad_server = None
@@ -390,6 +391,7 @@ def run():
         PROXY_HOST or LISTEN_HOST, SOCKS_PORT, HTTP_PORT, WPAD_PORT,
         notifications_enabled=ENABLE_STATUS_NOTIFICATIONS,
         widget_enabled=ENABLE_STATUS_WIDGET,
+        widget_publisher=widget_publisher,
     )
     shutdown_reason = "Stopped by user"
     shutdown_failed = False
@@ -578,7 +580,10 @@ def run():
         raise
     finally:
         stop_services()
-        status_publisher.finish(shutdown_reason, failed=shutdown_failed, stats=stats)
+        status_publisher.finish(
+            shutdown_reason, failed=shutdown_failed, stats=stats,
+            restarting=restart_requested and not shutdown_failed,
+        )
     return restart_requested
 
 
@@ -586,9 +591,12 @@ def run_proxy():
     """Restart in the owning script after all of the previous run's cleanup."""
     global initial_output
     startup_banner = initial_output
+    # Pyto clears sys.modules when another script (including restart.py) runs.
+    # Keep the widget worker's working UI bindings alive across server runs.
+    widget_publisher = InAppWidgetPublisher(enabled=ENABLE_STATUS_WIDGET)
     while True:
         initial_output = startup_banner
-        if not run():
+        if not run(widget_publisher=widget_publisher):
             return
         print("Restarting proxy server.")
 

@@ -13,7 +13,7 @@ WIDGET_KEY = "iOS Proxy"
 STALE_AFTER = 60
 
 
-def read_live_status():
+def _read_live_status_once(socket_timeout=2):
     try:
         import userkeys
         control = userkeys.get(CONTROL_KEY)
@@ -30,7 +30,7 @@ def read_live_status():
             or control.get("status_supported") is not True):
         return {"state": "unavailable", "reason": "Run the updated socks5.py first"}
     try:
-        with socket.create_connection(("127.0.0.1", control["port"]), timeout=2) as client:
+        with socket.create_connection(("127.0.0.1", control["port"]), timeout=socket_timeout) as client:
             client.sendall(b"STATUS " + control["token"].encode("ascii") + b"\n")
             with client.makefile("rb") as reader:
                 response = reader.readline(16384)
@@ -40,6 +40,19 @@ def read_live_status():
         return data
     except (OSError, ValueError) as error:
         return {"state": "unavailable", "reason": "Live proxy status unavailable: " + str(error)}
+
+
+def read_live_status(retry_timeout=5):
+    """Rediscover the current control port/token while a restart replaces it."""
+    deadline = time.monotonic() + retry_timeout
+    while True:
+        remaining = max(0, deadline - time.monotonic())
+        data = _read_live_status_once(socket_timeout=max(0.1, min(2, remaining)))
+        if data.get("state") != "unavailable" or time.monotonic() >= deadline:
+            return data
+        # Fetch userkeys again on each attempt, rather than reconnecting with
+        # the old run's token and reporting unavailable during normal cleanup.
+        time.sleep(min(0.2, max(0, deadline - time.monotonic())))
 
 
 def display_state(snapshot, now=None):
