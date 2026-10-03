@@ -81,6 +81,41 @@ A simple HTTP/SOCKS proxy designed to run on Pythonista on iOS, letting you fake
     - For Android: open Settings, Wi-Fi, select your network, expand the Advanced Settings, change the proxy setting to Manual, and enter the host and port for the *HTTP proxy*. Note that SOCKS proxy support on Android is limited, even when using the PAC URL, so the HTTP proxy is recommended.
         - Many applications on Android do not respect proxy settings, unfortunately, and in those cases you will have to configure the apps manually or use an app like Proxifier to force apps to use the proxy.
 
+## Pyto notifications and Home Screen status widget
+
+The proxy sends a notification after both proxy listeners start, when you stop
+it, when the Wi-Fi monitor triggers shutdown, or when startup/runtime fails.
+Allow notifications for Pyto when prompted, or enable them in iOS Settings >
+Notifications > Pyto. Notifications depend on iOS permissions and Focus settings.
+Set `ENABLE_STATUS_NOTIFICATIONS = False` in `socks5.py` to disable them.
+Wi-Fi shutdown alerts require `EXIT_ON_WIFI_DISCONNECT = True`; this monitors
+the startup interface/address, with `WIFI_NETWORK_NAME` used only as a label.
+
+To install the widget:
+
+1. Keep `proxy_widget.py` and the `proxy_lib` folder together in the downloaded
+   project in Pyto. Run `proxy_widget.py` once to preview/register it.
+2. Add a **Pyto > Run Script** widget to your iPhone Home Screen. Edit the widget
+   and select `proxy_widget.py`. Medium size shows addresses and traffic; large
+   also shows totals, errors, and the last event.
+3. Run `socks5.py` with `ENABLE_STATUS_WIDGET = True` (the default).
+
+The server saves its status every five seconds in Pyto's shared `userkeys`
+storage, which the separate widget process can read without starting a proxy
+or making network requests. Only the most recent proxy run is displayed.
+The widget requests a refresh after about a minute, but iOS may delay it.
+“Running (snapshot)” means the listeners were running at the displayed update
+time; it does not prove internet connectivity. A timeline entry changes that
+snapshot to “Status unconfirmed” once it is 60 seconds old. This can occur while
+the proxy is still working if iOS delays widget refreshes. Tapping the widget
+opens its script in Pyto and prints the latest status and PAC URL.
+
+Normal Stop, Pyto's native Stop watcher, and Wi-Fi shutdown save a stopped
+status. If iOS terminates the entire app, Python cannot send a shutdown alert;
+the old heartbeat becomes unconfirmed. These features safely skip unavailable
+Pyto APIs on other hosts. See [Pyto widgets](https://pyto.readthedocs.io/en/latest/library/widgets.html)
+and [notifications](https://pyto.readthedocs.io/en/latest/library/notifications.html).
+
 # Why
 
 Recently, while travelling, I found out that Google Fi doesn't support tethering on iOS (I guess it's a feature they want to keep Android-exclusive or something?). Since my phone has a nice, fast, unblocked connection, I wanted to let my computer access it too.

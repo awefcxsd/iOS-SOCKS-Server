@@ -15,6 +15,7 @@ from proxy_lib.lifecycle import (
 from proxy_lib.proxy_server import AsyncProxyServer
 from proxy_lib.socks5_server import AsyncSocks5Handler
 from proxy_lib.status import StatusMonitor
+from proxy_lib.pyto_status import PytoStatusPublisher
 
 logging.basicConfig(level=logging.ERROR)
 
@@ -42,6 +43,9 @@ CUSTOM_RESOLVERS = []
 KEEP_ALIVE_WITH_AUDIO = True
 # Play a quiet 440 Hz tone instead of silence to verify background playback.
 BACKGROUND_AUDIO_TEST_TONE = False
+# Pyto-only status features; other Python hosts continue without these APIs.
+ENABLE_STATUS_NOTIFICATIONS = True
+ENABLE_STATUS_WIDGET = True
 
 # Stop the server when the WiFi connection used at startup goes away. iOS does
 # not reliably expose the SSID to Pyto, so this name is a label for the network
@@ -381,6 +385,13 @@ def run():
     proxy_servers = []
     monitor_stop_event = threading.Event()
     stop_watcher = None
+    status_publisher = PytoStatusPublisher(
+        PROXY_HOST or LISTEN_HOST, SOCKS_PORT, HTTP_PORT, WPAD_PORT,
+        notifications_enabled=ENABLE_STATUS_NOTIFICATIONS,
+        widget_enabled=ENABLE_STATUS_WIDGET,
+    )
+    shutdown_reason = "Stopped by user"
+    shutdown_failed = False
 
     def emergency_stop_services():
         # Pyto's native Stop can park the owning thread without running finally.
@@ -391,6 +402,7 @@ def run():
         if wpad_server is not None:
             steps.append(lambda: stop_wpad_server(wpad_server, thread))
         cleanup_steps(*steps)
+        status_publisher.finish("Stopped with Pyto's Stop button", stats=stats)
         print("Pyto Stop detected; proxy sockets and background audio stopped.")
 
     def stop_services():
@@ -406,6 +418,7 @@ def run():
         cleanup_steps(*steps)
 
     try:
+        status_publisher.starting()
         stop_watcher = PytoStopWatcher(emergency_stop_services)
         if stop_watcher.start():
             initial_output += "Pyto native Stop watcher enabled (shutdown v2)\n"
@@ -456,7 +469,7 @@ def run():
                 "Warning: auto-stop is enabled, but no WiFi connection was found "
                 "at startup\n"
             )
-        stats = StatusMonitor(initial_output)
+        stats = StatusMonitor(initial_output, on_update=status_publisher.update)
         root_logger = logging.getLogger()
         root_logger.addHandler(stats)
 
@@ -491,6 +504,7 @@ def run():
             )
             proxy_servers.extend((socks_server, http_server))
             await asyncio.gather(socks_server.start(), http_server.start())
+            status_publisher.running()
             stats_task = asyncio.create_task(stats.render_forever())
             shutdown_event = asyncio.Event()
             monitor_thread = None
@@ -502,6 +516,8 @@ def run():
                 loop = asyncio.get_running_loop()
 
                 def request_wifi_shutdown():
+                    nonlocal shutdown_reason
+                    shutdown_reason = "WiFi network {} disconnected".format(WIFI_NETWORK_NAME)
                     loop.call_soon_threadsafe(shutdown_event.set)
 
                 monitor_thread = service_thread(
@@ -538,8 +554,13 @@ def run():
             run_until_stopped(main(), stop_services)
         except (KeyboardInterrupt, SystemExit):
             print("Shutting down.")
+    except Exception as error:
+        shutdown_reason = "{}: {}".format(type(error).__name__, error)
+        shutdown_failed = True
+        raise
     finally:
         stop_services()
+        status_publisher.finish(shutdown_reason, failed=shutdown_failed, stats=stats)
 
 
 if __name__ == "__main__":

@@ -76,6 +76,7 @@ class StatusMonitor(TrafficStats, logging.Handler):
         interval: float = 1,
         smoothing: float = 0.5,
         log_level: int = logging.NOTSET,
+        on_update=None,
     ):
         logging.Handler.__init__(self, log_level)
         self.banner = banner
@@ -85,6 +86,7 @@ class StatusMonitor(TrafficStats, logging.Handler):
         self.num_connections = 0
         self.messages: list[str] = []
         self.num_errors = 0
+        self.on_update = on_update
 
     def add_inbound(self, nbytes: int) -> None:
         self.inbound.add(nbytes)
@@ -97,6 +99,18 @@ class StatusMonitor(TrafficStats, logging.Handler):
 
     def remove_connection(self) -> None:
         self.num_connections -= 1
+
+    def snapshot(self):
+        """Read counters without resetting the throughput measurement window."""
+        megabit = 1024 * 1024 / 8
+        return {
+            "connections": self.num_connections,
+            "in_mbps": self.inbound._average / megabit,
+            "out_mbps": self.outbound._average / megabit,
+            "in_bytes": self.inbound._total + self.inbound._window,
+            "out_bytes": self.outbound._total + self.outbound._window,
+            "errors": self.num_errors,
+        }
 
     def emit(self, record: logging.LogRecord) -> None:
         self.messages.append(self.format(record))
@@ -119,6 +133,8 @@ class StatusMonitor(TrafficStats, logging.Handler):
 
             inbound_average, inbound_total = self.inbound.update()
             outbound_average, outbound_total = self.outbound.update()
+            if self.on_update is not None:
+                self.on_update(self)
             megabit = 1024 * 1024 / 8
             megabyte = 1024 * 1024
 
