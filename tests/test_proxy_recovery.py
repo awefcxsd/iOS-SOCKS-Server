@@ -27,20 +27,17 @@ class ProxyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(server.resolver_source, "10.0.0.2")
         self.assertEqual(resolver.nameservers, ["1.1.1.1", "2606:4700:4700::1111"])
 
-    async def test_dns_family_can_change_after_network_change(self):
+    async def test_ipv6_only_source_change_is_rejected(self):
         resolver = Resolver(configure=False)
         resolver.nameservers = ["1.1.1.1", "2606:4700:4700::1111"]
         server = AsyncProxyServer(
             AsyncHTTPProxyHandler, resolver=resolver, connect_host_ipv4="10.0.0.1",
             source_address_provider=lambda: (None, "2001:db8::2"),
         )
-        server.refresh_source_addresses()
-        self.assertEqual(server.resolver.nameservers, ["2606:4700:4700::1111"])
-        self.assertEqual(server.resolver_source, "2001:db8::2")
-        server.resolver.resolve = AsyncMock(side_effect=OSError("DNS blocked"))
-        with self.assertRaisesRegex(OSError, "DNS lookup failed.*DNS blocked"):
-            await server.resolve_address(Socks5AddressType.DOMAIN, ("example.com", 443))
-        self.assertEqual(server.resolver.resolve.call_args.kwargs["source"], "2001:db8::2")
+        with self.assertRaisesRegex(OSError, "no active IPv4 address"):
+            server.refresh_source_addresses()
+        self.assertEqual(server.resolver.nameservers, ["1.1.1.1"])
+        self.assertEqual(server.resolver_source, "10.0.0.1")
 
     async def test_http_error_closes_client_socket(self):
         server = AsyncProxyServer(
@@ -70,7 +67,7 @@ class ProxyRecoveryTests(unittest.IsolatedAsyncioTestCase):
             source_address_provider=lambda: (None, "2001:4860::2"),
         )
         for _ in range(2):
-            with self.assertRaisesRegex(Exception, "suitable nameservers"):
+            with self.assertRaisesRegex(OSError, "no active IPv4 address"):
                 server.refresh_source_addresses()
         self.assertEqual(server.resolver_source, "10.0.0.1")
         self.assertEqual(server.resolver.nameservers, ["1.1.1.1"])
@@ -99,12 +96,11 @@ class SourceSelectionTests(unittest.TestCase):
         source = Path(__file__).resolve().parents[1] / "socks5.py"
         tree = ast.parse(source.read_text())
         functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
-                     and node.name in ("is_globally_routable", "current_source_addresses")]
-        import ipaddress
-        self.namespace = dict(socket=socket, ipaddress=ipaddress,
+                     and node.name == "current_source_addresses"]
+        self.namespace = dict(socket=socket,
                               IFF_UP=1, IFF_RUNNING=0x40,
-                              connect_interface_ipv4="pdp_ip0", connect_interface_ipv6="pdp_ip0",
-                              CONNECT_HOST_IPV4="10.0.0.1", CONNECT_HOST_IPV6="2001:4860::1")
+                              connect_interface_ipv4="pdp_ip0",
+                              CONNECT_HOST_IPV4="10.0.0.1")
         exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), self.namespace)
 
     def select(self, interfaces):
@@ -130,6 +126,16 @@ class SourceSelectionTests(unittest.TestCase):
             self.interface(socket.AF_INET, "10.0.0.2"),
             self.interface(socket.AF_INET6, "fe80::1"),
         ]), ("10.0.0.2", None))
+
+    def test_global_ipv6_is_not_selected(self):
+        self.assertEqual(self.select([
+            self.interface(socket.AF_INET, "10.0.0.2"),
+            self.interface(socket.AF_INET6, "2001:4860::1"),
+        ]), ("10.0.0.2", None))
+
+    def test_ipv6_cannot_replace_missing_ipv4(self):
+        with self.assertRaisesRegex(OSError, "no active addresses"):
+            self.select([self.interface(socket.AF_INET6, "2001:4860::1")])
 
 
 if __name__ == "__main__":

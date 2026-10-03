@@ -1,9 +1,8 @@
 #!python3
 # Socks5/HTTP Proxy server for Pythonista by @nneonneo
-# Pretty statistics view and IPv6 support added by @philrosenthal
+# Pretty statistics view added by @philrosenthal; networking uses IPv4 only.
 
 import asyncio
-import ipaddress
 import logging
 import socket
 import threading
@@ -21,7 +20,6 @@ logging.basicConfig(level=logging.ERROR)
 PROXY_HOST = "172.20.10.1"
 # IP over which the proxy will attempt to connect to the Internet
 CONNECT_HOST_IPV4 = None
-CONNECT_HOST_IPV6 = None
 # Use iOS routing directly instead of automatically binding cellular/VPN IPs.
 # Useful when default-route HTTPS works but a bound route fails in diagnostics.
 USE_SYSTEM_DEFAULT_ROUTE = False
@@ -54,7 +52,6 @@ IFF_UP = 0x1
 IFF_RUNNING = 0x40
 CONNECTIVITY_TEST_TIMEOUT = 5
 IPV4_TEST_ADDRESS = ("1.1.1.1", 80)
-IPV6_TEST_ADDRESS = ("2606:4700:4700::1111", 80)
 
 # Try to keep the screen from turning off (iOS)
 try:
@@ -64,23 +61,6 @@ try:
     on_main_thread(console.set_idle_timer_disabled)(True)
 except ImportError:
     pass
-
-
-def is_globally_routable(ipv6_address):
-    non_routable_networks = [
-        "ff00::/8",  # Multicast address range
-        "fe80::/10",  # Link-local address range
-        "fc00::/7",  # Unique local address range
-        "::/8",  # Unspecified address range
-        "2001:db8::/32",  # Documentation address range
-        "2001::/32",  # Teredo address range
-        "2002::/16",  # 6to4 address range
-        "ff02::/16",  # Link-local multicast address range
-    ]
-    for network in non_routable_networks:
-        if ipaddress.ip_address(ipv6_address) in ipaddress.ip_network(network):
-            return False
-    return True
 
 
 def test_tcp_connectivity(family, source_address, target_address):
@@ -101,9 +81,6 @@ DEFAULT_RESOLVERS = [
     "1.0.0.1",
     "1.1.1.1",
     "8.8.8.8",
-    "2606:4700:4700::1111",
-    "2606:4700:4700::1001",
-    "2001:4860:4860::8844",
 ]
 
 try:
@@ -130,11 +107,9 @@ try:
 
     initial_output = ""
     ipv4_output = ""
-    ipv6_output = ""
     wifi_interface_name = None
     wifi_interface_address = None
     connect_interface_ipv4 = None
-    connect_interface_ipv6 = None
 
     interfaces = ifaddrs.get_interfaces()
     iftypes = defaultdict(list)
@@ -197,19 +172,15 @@ try:
         )
 
     if USE_SYSTEM_DEFAULT_ROUTE:
-        CONNECT_HOST_IPV4 = CONNECT_HOST_IPV6 = None
+        CONNECT_HOST_IPV4 = None
         ipv4_output += "Will use the system default route (source binding disabled)\n"
     elif iftypes["cell"]:
         iface_ipv4 = next(
             (iface for iface in iftypes["cell"] if iface.addr.family == socket.AF_INET),
             None,
         )
-        iface_ipv6 = None
-
-        is_vpn = iface_ipv4 and iface_ipv4.name.startswith("utun")
 
         if iface_ipv4:
-            iface_ipv4.addr.address
             ipv4_error = test_tcp_connectivity(
                 socket.AF_INET,
                 iface_ipv4.addr.address,
@@ -239,55 +210,7 @@ try:
                 )
                 CONNECT_HOST_IPV4 = None
 
-            # Create a list of all IPv6 addresse that are globally routable and match the IPv4 interface
-            iface_ipv6_list = [
-                iface
-                for iface in iftypes["cell"]
-                if iface.addr.family == socket.AF_INET6
-                and iface.addr.address
-                and (is_globally_routable(iface.addr.address) if not is_vpn else True)
-                and iface.name == iface_ipv4.name
-            ]
-
-            # Select the last IPv6 address to select the temporary address for reduced tracking
-            iface_ipv6 = iface_ipv6_list[-1] if iface_ipv6_list else None
-
-        if iface_ipv6 is None and not is_vpn:
-            # Create a list of all IPv6 addresses that are globally routable
-            iface_ipv6_list = [
-                iface
-                for iface in iftypes["cell"]
-                if iface.addr.family == socket.AF_INET6
-                and iface.addr.address
-                and is_globally_routable(iface.addr.address)
-            ]
-
-            # Select the last IPv6 address to select the temporary address for reduced tracking
-            iface_ipv6 = iface_ipv6_list[-1] if iface_ipv6_list else None
-
-        if iface_ipv6:
-            iface_ipv6.addr.address
-            ipv6_output += "Will connect to IPv6 servers over interface %s at %s\n" % (
-                iface_ipv6.name,
-                iface_ipv6.addr.address,
-            )
-            # Test IPv6 connectivity
-            ipv6_error = test_tcp_connectivity(
-                socket.AF_INET6,
-                iface_ipv6.addr.address,
-                IPV6_TEST_ADDRESS,
-            )
-            if ipv6_error is None:
-                CONNECT_HOST_IPV6 = iface_ipv6.addr.address
-                connect_interface_ipv6 = iface_ipv6.name
-            else:
-                ipv6_output += (
-                    "Failed to connect to %s:%d over IPv6 due to: %s\n"
-                    % (IPV6_TEST_ADDRESS[0], IPV6_TEST_ADDRESS[1], ipv6_error)
-                )
-                CONNECT_HOST_IPV6 = None
-
-    initial_output += ipv4_output + ipv6_output
+    initial_output += ipv4_output + "IPv4 only (IPv6 disabled)\n"
     print(initial_output)
 except Exception as e:
     logging.error("Address detection failed: %s: %s", type(e).__name__, e)
@@ -299,7 +222,6 @@ except Exception as e:
     wifi_interface_name = None
     wifi_interface_address = None
     connect_interface_ipv4 = None
-    connect_interface_ipv6 = None
 
 
 def current_source_addresses():
@@ -317,18 +239,16 @@ def current_source_addresses():
         addresses = [
             iface.addr.address for iface in active_interfaces
             if iface.name == interface_name and iface.addr.family == family
-            and (family != socket.AF_INET6 or interface_name.startswith("utun")
-                 or is_globally_routable(iface.addr.address))
         ]
         if configured_address in addresses:
             return configured_address
         if not addresses:
             return None
-        return addresses[-1] if family == socket.AF_INET6 else addresses[0]
+        return addresses[0]
 
     addresses = (
         address_for(connect_interface_ipv4, socket.AF_INET, CONNECT_HOST_IPV4),
-        address_for(connect_interface_ipv6, socket.AF_INET6, CONNECT_HOST_IPV6),
+        None,
     )
     if addresses == (None, None):
         raise OSError(
@@ -523,7 +443,7 @@ def run():
             source_address_provider = (
                 current_source_addresses
                 if REFRESH_SOURCE_ADDRESSES
-                and (connect_interface_ipv4 or connect_interface_ipv6)
+                and connect_interface_ipv4
                 else None
             )
             socks_server = AsyncProxyServer(
@@ -533,7 +453,6 @@ def run():
                 traffic_stats=stats,
                 resolver=resolver,
                 connect_host_ipv4=CONNECT_HOST_IPV4,
-                connect_host_ipv6=CONNECT_HOST_IPV6,
                 source_address_provider=source_address_provider,
             )
             http_server = AsyncProxyServer(
@@ -543,7 +462,6 @@ def run():
                 traffic_stats=stats,
                 resolver=resolver,
                 connect_host_ipv4=CONNECT_HOST_IPV4,
-                connect_host_ipv6=CONNECT_HOST_IPV6,
                 source_address_provider=source_address_provider,
             )
             proxy_servers.extend((socks_server, http_server))

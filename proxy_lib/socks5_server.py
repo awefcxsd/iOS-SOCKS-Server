@@ -1,7 +1,7 @@
 #!python3
 # Asynchronous SOCKS5 proxy server with multi-homing support.
 # Asyncified from https://github.com/rushter/socks5/blob/master/server.py by @nneonneo
-# IPv6 support by @philrosenthal
+# IPv4-only listeners and forwarding.
 
 import asyncio
 import logging
@@ -78,7 +78,6 @@ class UdpForwarder:
         self.server = server
         self.local_address = local_address
         self.server_conn_ipv4: asyncio.DatagramTransport | None = None
-        self.server_conn_ipv6: asyncio.DatagramTransport | None = None
         self.connections: dict[
             tuple[asyncio.DatagramTransport, SocketAddress], SocketAddress
         ] = {}
@@ -92,36 +91,19 @@ class UdpForwarder:
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
-        client_family = socket.AF_INET6 if ":" in self.local_address else socket.AF_INET
         self.client_conn, _ = await loop.create_datagram_endpoint(
             lambda: UdpForwarderProtocol(self.on_client_datagram),
-            family=client_family,
+            family=socket.AF_INET,
             local_addr=(self.local_address, 0),
         )
         self.track_transport(self.client_conn)
 
-        connect_host_ipv4 = self.server.connect_host_ipv4
-        connect_host_ipv6 = self.server.connect_host_ipv6
-
-        if connect_host_ipv4 is None and connect_host_ipv6 is None:
-            connect_host_ipv4 = "0.0.0.0"
-            connect_host_ipv6 = "::"
-
-        if connect_host_ipv4 is not None:
-            self.server_conn_ipv4, _ = await loop.create_datagram_endpoint(
-                lambda: UdpForwarderProtocol(self.on_server_datagram),
-                family=socket.AF_INET,
-                local_addr=(connect_host_ipv4, 0),
-            )
-            self.track_transport(self.server_conn_ipv4)
-
-        if connect_host_ipv6 is not None:
-            self.server_conn_ipv6, _ = await loop.create_datagram_endpoint(
-                lambda: UdpForwarderProtocol(self.on_server_datagram),
-                family=socket.AF_INET6,
-                local_addr=(connect_host_ipv6, 0),
-            )
-            self.track_transport(self.server_conn_ipv6)
+        self.server_conn_ipv4, _ = await loop.create_datagram_endpoint(
+            lambda: UdpForwarderProtocol(self.on_server_datagram),
+            family=socket.AF_INET,
+            local_addr=(self.server.connect_host_ipv4 or "0.0.0.0", 0),
+        )
+        self.track_transport(self.server_conn_ipv4)
 
     async def on_client_datagram(
         self,
@@ -141,10 +123,7 @@ class UdpForwarder:
             self.server.traffic_stats.add_outbound(len(payload))
 
             resolved = await self.server.resolve_address(address_type, address)
-            if resolved.ipv6 and self.server_conn_ipv6:
-                self.connections[self.server_conn_ipv6, resolved.ipv6] = client_addr
-                self.server_conn_ipv6.sendto(payload, resolved.ipv6)
-            elif resolved.ipv4 and self.server_conn_ipv4:
+            if resolved.ipv4 and self.server_conn_ipv4:
                 self.connections[self.server_conn_ipv4, resolved.ipv4] = client_addr
                 self.server_conn_ipv4.sendto(payload, resolved.ipv4)
             else:
@@ -188,15 +167,13 @@ class UdpForwarder:
         elif address_type == Socks5AddressType.DOMAIN:
             domain_length = ord(self.readall(sockf, 1))
             address = self.readall(sockf, domain_length).decode()
-        elif address_type == Socks5AddressType.IPV6:
-            address = socket.inet_ntop(socket.AF_INET6, self.readall(sockf, 16))
         else:
             return None
         (port,) = self.readstruct(sockf, "!H")
         return address, port
 
     def close(self) -> None:
-        for transport in (self.client_conn, self.server_conn_ipv4, self.server_conn_ipv6):
+        for transport in (self.client_conn, self.server_conn_ipv4):
             if transport is not None:
                 transport.close()
                 self.server._datagram_transports.discard(transport)
@@ -276,9 +253,6 @@ class AsyncSocks5Handler(AsyncProxyHandler):
         elif address_type == Socks5AddressType.DOMAIN:
             domain_length = ord(await self.reader.readexactly(1))
             address = (await self.reader.readexactly(domain_length)).decode()
-        elif address_type == Socks5AddressType.IPV6:
-            ip = await self.reader.readexactly(16)
-            address = socket.inet_ntop(socket.AF_INET6, ip)
         else:
             return None
 

@@ -13,6 +13,11 @@ A simple HTTP/SOCKS proxy designed to run on Pythonista on iOS, letting you fake
 
 # Running
 
+- Networking is IPv4 only: listeners, TCP/UDP forwarding, and DNS use IPv4.
+  IPv6 destinations are rejected, and domain lookups request A records only.
+  `CUSTOM_RESOLVERS` must include a reachable IPv4 DNS server. This also applies
+  when `USE_SYSTEM_DEFAULT_ROUTE = True`.
+
 - Connect your devices to the same WiFi network as your phone. If there's no suitable network, you can create a computer-to-computer (ad-hoc) network using your laptop and connect to it with your phone.
 - Open the home screen shortcut (if you made one), or open the `socks5.py` script in Pythonista and hit Run. 
 - By default, the script loops a generated silent audio file while it runs. This
