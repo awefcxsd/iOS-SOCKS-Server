@@ -4,11 +4,13 @@ import socket
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from proxy_lib.background_audio import BackgroundAudio
 from proxy_lib.http_proxy_server import AsyncHTTPProxyHandler
-from proxy_lib.lifecycle import cleanup_steps, run_until_stopped, stop_wpad_server
+from proxy_lib.lifecycle import (
+    PytoStopWatcher, cleanup_steps, run_until_stopped, service_thread, stop_wpad_server,
+)
 from proxy_lib.proxy_server import AsyncProxyServer, close_writer
 from proxy_lib.socks5_server import AsyncSocks5Handler
 
@@ -18,7 +20,7 @@ def wpad_factory():
     tree = ast.parse(path.read_text())
     nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef)
              and node.name == "create_wpad_server"]
-    namespace = {}
+    namespace = {"service_thread": service_thread}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), namespace)
     return namespace["create_wpad_server"]
 
@@ -96,6 +98,58 @@ class ShutdownTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ScriptStopTests(unittest.TestCase):
+    def test_service_threads_do_not_use_pytos_registering_subclass(self):
+        original = threading.Thread
+        registered = Mock()
+
+        class PytoThread(original):
+            def run(self):
+                registered()
+                super().run()
+
+        ran = threading.Event()
+        with patch("threading.Thread", PytoThread):
+            thread = service_thread(target=ran.set, daemon=True)
+            thread.start()
+            thread.join(timeout=1)
+        self.assertTrue(ran.is_set())
+        registered.assert_not_called()
+
+    def test_native_stop_closes_sockets_without_running_event_loop(self):
+        server = AsyncProxyServer(AsyncHTTPProxyHandler)
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        client = socket.create_connection(("127.0.0.1", port), timeout=1)
+        accepted, _ = listener.accept()
+        server.server = Mock(sockets=[listener])
+        server._writers.add(Mock(get_extra_info=Mock(return_value=accepted)))
+        running = threading.Event()
+        stopped = threading.Event()
+        running.set()
+
+        def stop():
+            server.emergency_stop()
+            stopped.set()
+
+        watcher = PytoStopWatcher(stop, interval=0.01, is_running=running.is_set)
+        try:
+            watcher.start()
+            # No event loop exists to process transport-close callbacks.
+            running.clear()
+            self.assertTrue(stopped.wait(timeout=1))
+            self.assertEqual(client.recv(1), b"")
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", port))
+        finally:
+            watcher.stop()
+            if watcher.thread is not None:
+                watcher.thread.join(timeout=1)
+            client.close()
+            accepted.close()
+            listener.close()
+
     def test_partial_startup_failure_releases_first_listener_and_audio(self):
         servers = []
         ports = []

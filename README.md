@@ -53,6 +53,13 @@ A simple HTTP/SOCKS proxy designed to run on Pythonista on iOS, letting you fake
   WPAD requests have a one-second socket timeout, and WPAD shutdown uses bounded
   thread waits. Cleanup also runs if startup fails, and a failed cleanup action
   does not prevent the other actions from running.
+- Newer Pyto builds can stop a script through a native signal that parks its
+  thread without executing Python cleanup. A separate watcher checks Pyto's
+  running-script registry and directly closes the native proxy sockets and
+  background audio when the script is removed. The banner shows
+  `Pyto native Stop watcher enabled (shutdown v2)` when this protection is active.
+  Helper threads also bypass Pyto's script-registering Thread subclass so the
+  Wi-Fi monitor or a WPAD request cannot replace the script's Stop target.
 - By default, the server watches the Wi-Fi or hotspot bridge interface and IPv4 address present
   at startup as `Subaru_5G`. If that connection disappears or changes for six
   seconds, the proxy, WPAD server, and background audio are stopped. Start the

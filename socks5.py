@@ -9,7 +9,9 @@ import threading
 
 from proxy_lib.background_audio import BackgroundAudio
 from proxy_lib.http_proxy_server import AsyncHTTPProxyHandler
-from proxy_lib.lifecycle import cleanup_steps, run_until_stopped, stop_wpad_server
+from proxy_lib.lifecycle import (
+    PytoStopWatcher, cleanup_steps, run_until_stopped, service_thread, stop_wpad_server,
+)
 from proxy_lib.proxy_server import AsyncProxyServer
 from proxy_lib.socks5_server import AsyncSocks5Handler
 from proxy_lib.status import StatusMonitor
@@ -315,6 +317,12 @@ def create_wpad_server(hhost, hport, phost, pport):
         block_on_close = False
         allow_reuse_address = True
 
+        def process_request(self, request, client_address):
+            service_thread(
+                target=self.process_request_thread,
+                args=(request, client_address), daemon=True,
+            ).start()
+
         def get_request(self):
             request, address = super().get_request()
             request.settimeout(1)
@@ -372,9 +380,23 @@ def run():
     root_logger = logging.getLogger()
     proxy_servers = []
     monitor_stop_event = threading.Event()
+    stop_watcher = None
+
+    def emergency_stop_services():
+        # Pyto's native Stop can park the owning thread without running finally.
+        # This callback runs independently and must not rely on asyncio callbacks.
+        steps = [monitor_stop_event.set]
+        steps.extend(server.emergency_stop for server in proxy_servers)
+        steps.append(background_audio.stop)
+        if wpad_server is not None:
+            steps.append(lambda: stop_wpad_server(wpad_server, thread))
+        cleanup_steps(*steps)
+        print("Pyto Stop detected; proxy sockets and background audio stopped.")
 
     def stop_services():
         steps = [monitor_stop_event.set]
+        if stop_watcher is not None:
+            steps.append(stop_watcher.stop)
         steps.extend(server.stop_now for server in proxy_servers)
         steps.append(background_audio.stop)
         if wpad_server is not None:
@@ -384,6 +406,9 @@ def run():
         cleanup_steps(*steps)
 
     try:
+        stop_watcher = PytoStopWatcher(emergency_stop_services)
+        if stop_watcher.start():
+            initial_output += "Pyto native Stop watcher enabled (shutdown v2)\n"
         background_audio_enabled = KEEP_ALIVE_WITH_AUDIO and background_audio.start()
 
         wpad_server = create_wpad_server(LISTEN_HOST, WPAD_PORT, PROXY_HOST, SOCKS_PORT)
@@ -435,7 +460,7 @@ def run():
         root_logger = logging.getLogger()
         root_logger.addHandler(stats)
 
-        thread = threading.Thread(target=run_wpad_server, args=(wpad_server,))
+        thread = service_thread(target=run_wpad_server, args=(wpad_server,))
         thread.daemon = True
         thread.start()
 
@@ -479,7 +504,7 @@ def run():
                 def request_wifi_shutdown():
                     loop.call_soon_threadsafe(shutdown_event.set)
 
-                monitor_thread = threading.Thread(
+                monitor_thread = service_thread(
                     target=monitor_wifi_connection,
                     args=(
                         wifi_interface_name,

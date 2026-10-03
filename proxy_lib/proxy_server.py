@@ -196,6 +196,23 @@ class AsyncProxyServer:
         for task in tuple(self._client_tasks):
             task.cancel()
 
+    def emergency_stop(self) -> None:
+        """Close native sockets even if Pyto parked the asyncio thread."""
+        self._closing = True
+        sockets = list(self.server.sockets or ()) if self.server is not None else []
+        sockets.extend(writer.get_extra_info("socket") for writer in tuple(self._writers))
+        sockets.extend(transport.get_extra_info("socket")
+                       for transport in tuple(self._datagram_transports))
+        for sock in sockets:
+            if sock is None:
+                continue
+            native_socket = getattr(sock, "_sock", sock)
+            try:
+                native_socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            native_socket.close()
+
     async def close(self) -> None:
         self.stop_now()
         if self._client_tasks:
