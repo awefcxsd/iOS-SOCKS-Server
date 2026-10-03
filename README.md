@@ -126,14 +126,15 @@ To install the widget:
    saves the same named In App widget. It can also register an unavailable
    state before the server has started.
 
-While running, the server publishes current connections, throughput, and totals
-every five seconds, plus immediately at startup, shutdown, failure, and restart.
-Publishing runs on a separate helper thread so widget rendering does not block
-proxy networking. Automatic updates save native widget layouts without opening
-preview sheets. Tapping the widget opens `proxy_widget.py`, which reads the
-current counters through an authenticated `STATUS` request to the loopback
-control listener. Shared storage supplies only the listener port and token;
-the widget does not read the persisted traffic heartbeat.
+While running, the widget's helper thread fetches current connections,
+throughput, and totals from the live server every ten seconds through an
+authenticated `STATUS` request to the loopback control listener. This polling
+continues independently of the server's console/status heartbeat. Startup,
+shutdown, failure, and restart still update the widget immediately.
+Widget rendering runs on that separate helper thread and saves native layouts
+without opening preview sheets. Tapping the widget opens `proxy_widget.py`,
+which also fetches current counters. Shared storage supplies only the listener
+port and token; the widget does not read the persisted traffic heartbeat.
 The widget worker remains active across `restart.py` requests, retaining its
 working Pyto UI bindings even when Pyto clears imported script modules.
 Live lookups retry for up to five seconds while restart replaces the control
@@ -142,8 +143,8 @@ next update rather than permanently disabling the widget.
 
 The In App widget uses native text/layout elements rather than a bitmap
 snapshot or precomputed running/stale timeline. iOS still controls Home Screen
-refresh timing, so publishing every five seconds does not guarantee the screen
-refreshes every five seconds. The relative “Updated” time indicates the age of
+refresh timing, so publishing every ten seconds does not guarantee the screen
+refreshes every ten seconds. The relative “Updated” time indicates the age of
 the displayed data. If iOS terminates Pyto, no further updates or stop alert can
 be sent; tapping the widget reports that the live server is unavailable.
 “Running” means proxy listeners are active, rather than proving internet

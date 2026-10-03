@@ -6,7 +6,7 @@ from proxy_lib.pyto_widget import InAppWidgetPublisher
 
 
 STATUS_KEY = "ios_socks_server.status.v1"
-HEARTBEAT_INTERVAL = 5
+HEARTBEAT_INTERVAL = 10
 STALE_AFTER = 60
 
 
@@ -55,12 +55,13 @@ class PytoStatusPublisher:
         self.finished = False
         self.last_publish = 0
 
-    def _publish(self, final=False):
+    def _publish(self, final=False, refresh_widget=True):
         self.snapshot["updated_at"] = time.time()
         self.last_publish = time.monotonic()
         if not self.widget_enabled:
             return
-        self.widget_publisher.submit(self.snapshot, final=final)
+        if refresh_widget:
+            self.widget_publisher.submit(self.snapshot, final=final)
         if not self.storage_enabled:
             return
         try:
@@ -111,7 +112,7 @@ class PytoStatusPublisher:
         if self.finished or time.monotonic() - self.last_publish < HEARTBEAT_INTERVAL:
             return
         self.snapshot.update(stats.snapshot())
-        self._publish()
+        self._publish(refresh_widget=False)
 
     def finish(self, reason="Stopped by user", failed=False, stats=None, restarting=False):
         # Several cleanup paths run for a single shutdown; notify only once.

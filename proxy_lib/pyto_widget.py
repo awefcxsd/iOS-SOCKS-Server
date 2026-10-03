@@ -1,6 +1,7 @@
 """Publish current server counters to a named Pyto In App widget."""
 
 import logging
+import time
 from pathlib import Path
 from queue import Empty, Full, Queue
 from datetime import datetime
@@ -8,9 +9,13 @@ from datetime import datetime
 from proxy_lib.lifecycle import service_thread
 
 
+WIDGET_REFRESH_INTERVAL = 10
+
+
 class InAppWidgetPublisher:
-    def __init__(self, enabled=True):
+    def __init__(self, enabled=True, refresh_interval=WIDGET_REFRESH_INTERVAL):
         self.enabled = enabled
+        self.refresh_interval = refresh_interval
         self.jobs = Queue(maxsize=1)
         self.thread = None
         self.finished = False
@@ -39,14 +44,23 @@ class InAppWidgetPublisher:
     def _publish(self):
         try:
             import widgets as wd
-            from proxy_widget import WIDGET_KEY, build_widget
+            from proxy_widget import WIDGET_KEY, build_widget, read_live_status
         except ImportError:
             self.enabled = False
             return
         last_error = None
+        next_refresh = time.monotonic() + self.refresh_interval
         while True:
-            data, final = self.jobs.get()
+            final = False
             try:
+                try:
+                    # Lifecycle changes wake this queue immediately. Between
+                    # changes, the widget fetches current server data itself.
+                    data, final = self.jobs.get(timeout=max(0, next_refresh - time.monotonic()))
+                except Empty:
+                    final = False
+                    next_refresh = time.monotonic() + self.refresh_interval
+                    data = read_live_status(retry_timeout=0)
                 widget = build_widget(wd, data, datetime.now())
                 # Pyto's public save_widget also presents a preview. Use its
                 # native save operation directly for automatic server updates,

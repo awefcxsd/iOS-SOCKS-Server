@@ -8,11 +8,12 @@ import unittest
 from unittest.mock import Mock, patch
 
 from proxy_lib.pyto_control import CONTROL_KEY, PytoProxyControl
-from proxy_lib.pyto_widget import InAppWidgetPublisher
+from proxy_lib.pyto_widget import InAppWidgetPublisher, WIDGET_REFRESH_INTERVAL
 from proxy_lib.pyto_status import HEARTBEAT_INTERVAL, PytoStatusPublisher
 import proxy_widget
 import stop
 import restart
+from queue import Empty
 
 
 class LiveWidgetTests(unittest.TestCase):
@@ -139,10 +140,13 @@ class LiveWidgetTests(unittest.TestCase):
                 (updated_saved if data["connections"] == 3 else replacement_saved).set()
 
         wd.__PyWidget__.addWidget.side_effect = save
-        worker = InAppWidgetPublisher()
-        with patch.dict(sys.modules, widgets=wd), patch("proxy_widget.build_widget", side_effect=build):
+        worker = InAppWidgetPublisher(refresh_interval=0.02)
+        active = []
+        with patch.dict(sys.modules, widgets=wd), patch("proxy_widget.build_widget", side_effect=build), \
+                patch("proxy_widget.read_live_status", side_effect=lambda **kwargs: active[0].live_status()):
             first = PytoStatusPublisher("first", 1, 2, 3, notifications_enabled=False,
                                         widget_publisher=worker)
+            active.append(first)
             first.running()
             self.assertTrue(first_saved.wait(2))
             original_thread = worker.thread
@@ -155,6 +159,7 @@ class LiveWidgetTests(unittest.TestCase):
             with patch.dict(sys.modules, widgets=SimpleNamespace(), proxy_widget=SimpleNamespace()):
                 second = PytoStatusPublisher("second", 1, 2, 3, notifications_enabled=False,
                                              widget_publisher=worker)
+                active[0] = second
                 try:
                     second.running()
                     self.assertTrue(replacement_saved.wait(2))
@@ -237,6 +242,83 @@ class LiveWidgetTests(unittest.TestCase):
         self.assertTrue(worker.enabled)
         self.assertFalse(worker.thread.is_alive())
         wd.__PyWidget__.addWidget.assert_called_once()
+
+    def test_polling_fetches_changed_live_counters_without_server_heartbeat_pushes(self):
+        self.assertEqual(WIDGET_REFRESH_INTERVAL, 10)
+        data = {"state": "running", "connections": 0, "host": "127.0.0.1"}
+        control = PytoProxyControl(Mock(), get_status=lambda: dict(data, updated_at=time.time()))
+        self.addCleanup(control.stop)
+        self.assertTrue(control.start())
+        wd = Mock()
+        wd.__PyWidget__ = Mock()
+        wd.__PyWidget__.alloc.return_value.init.side_effect = lambda: Mock()
+        initial_saved = threading.Event()
+        live_saved = threading.Event()
+
+        def build(wd, values, date):
+            return SimpleNamespace(**{
+                size + "_layout": SimpleNamespace(__widget_view__=dict(values))
+                for size in ("small", "medium", "large")
+            })
+
+        def save(native, key):
+            values = native.addView.call_args_list[0].args[0]
+            if values.get("connections") == 11:
+                live_saved.set()
+            else:
+                initial_saved.set()
+
+        wd.__PyWidget__.addWidget.side_effect = save
+        worker = InAppWidgetPublisher(refresh_interval=0.02)
+        with patch.dict(sys.modules, widgets=wd), patch("proxy_widget.build_widget", side_effect=build):
+            try:
+                worker.submit(data)
+                self.assertTrue(initial_saved.wait(2))
+                # No submit/update call: only the live server counters change.
+                data["connections"] = 11
+                self.assertTrue(live_saved.wait(2))
+            finally:
+                worker.submit({"state": "stopped"}, final=True)
+                worker.wait_closed()
+        self.assertFalse(worker.thread.is_alive())
+
+    def test_polling_cadence_accounts_for_time_spent_rendering(self):
+        clock = [0]
+        waits = []
+        fetched = []
+        wd = Mock()
+        wd.__PyWidget__ = Mock()
+        widget = SimpleNamespace(**{
+            size + "_layout": SimpleNamespace(__widget_view__=Mock())
+            for size in ("small", "medium", "large")
+        })
+        worker = InAppWidgetPublisher()
+        worker.thread = SimpleNamespace(script_path="proxy_widget.py")
+        worker.jobs = Mock()
+
+        def wait(timeout):
+            waits.append(timeout)
+            if len(waits) == 3:
+                return {"state": "stopped"}, True
+            clock[0] += timeout
+            raise Empty
+
+        def read(**kwargs):
+            fetched.append(clock[0])
+            return {"state": "running"}
+
+        def build(*args):
+            clock[0] += 2  # Simulate slow native rendering.
+            return widget
+
+        worker.jobs.get.side_effect = wait
+        with patch.dict(sys.modules, widgets=wd), \
+                patch("proxy_widget.read_live_status", side_effect=read), \
+                patch("proxy_widget.build_widget", side_effect=build), \
+                patch("proxy_lib.pyto_widget.time.monotonic", side_effect=lambda: clock[0]):
+            worker._publish()
+        self.assertEqual(fetched, [10, 20])
+        self.assertEqual(waits, [10, 8, 8])
 
 
 if __name__ == "__main__":
