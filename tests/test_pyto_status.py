@@ -32,6 +32,9 @@ class PytoStatusTests(unittest.TestCase):
                                   notifications=self.notifications)
         self.modules.start()
         self.addCleanup(self.modules.stop)
+        widget_publisher = patch("proxy_lib.pyto_status.InAppWidgetPublisher")
+        widget_publisher.start()
+        self.addCleanup(widget_publisher.stop)
 
     def publisher(self, **kwargs):
         return PytoStatusPublisher("192.168.1.2", 9876, 9877, 8088, **kwargs)
@@ -105,24 +108,20 @@ class PytoStatusTests(unittest.TestCase):
         snapshot["state"] = "stopped"
         self.assertEqual(display_state(snapshot, now + 10000), "stopped")
 
-    def test_widget_timeline_expires_snapshot_without_rereading_storage(self):
-        publisher = self.publisher()
-        publisher.running()
+    def test_widget_launcher_saves_named_in_app_content_from_live_data(self):
+        data = {"state": "running", "updated_at": datetime.now().timestamp(),
+                "host": "192.168.1.2", "connections": 7, "in_bytes": 1234}
         wd = Mock()
         wd.link = None
-        wd.TimelineProvider = object
         wd.Widget.side_effect = lambda: Mock()
-        with patch.dict(sys.modules, widgets=wd):
+        with patch.dict(sys.modules, widgets=wd), patch("proxy_widget.read_live_status", return_value=data):
             widget_main()
-        provider = wd.provide_timeline.call_args.args[0]
-        dates = provider.timeline()
-        self.assertEqual(len(dates), 2)
-        for date in dates:
-            provider.widget(date)
+        wd.save_widget.assert_called_once()
+        self.assertEqual(wd.save_widget.call_args.args[1], "iOS Proxy")
+        wd.provide_timeline.assert_not_called()
         texts = [call.args[0] for call in wd.Text.call_args_list]
-        self.assertIn("Running (snapshot)", texts)
-        self.assertIn("Status unconfirmed", texts)
-        self.assertEqual(provider.reload_time().total_seconds(), 0)
+        self.assertIn("Running", texts)
+        self.assertIn("7 connections", texts)
         build_widget(wd, {}, datetime.now())
         self.assertIn("No status yet", [call.args[0] for call in wd.Text.call_args_list])
 
@@ -147,25 +146,26 @@ class PytoStatusTests(unittest.TestCase):
         with patch.dict(sys.modules, widgets=wd):
             namespace = runpy.run_path(proxy_widget.__file__)
             self.assertEqual(namespace["__name__"], "<run_path>")
-            wd.provide_timeline.assert_called_once()
-            provider = wd.provide_timeline.call_args.args[0]
-            provider.widget(provider.timeline()[0])
+            wd.save_widget.assert_called_once()
             self.assertIn("iOS Proxy", [call.args[0] for call in wd.Text.call_args_list])
-            wd.provide_timeline.reset_mock()
+            wd.save_widget.reset_mock()
             runpy.run_path(proxy_widget.__file__, run_name="widget")
-            wd.provide_timeline.assert_called_once()
+            wd.save_widget.assert_called_once()
 
-    def test_standalone_widget_reads_the_servers_shared_status_and_expiry(self):
+    def test_live_status_uses_counters_newer_than_the_persisted_heartbeat(self):
         publisher = self.publisher()
         publisher.running()
-        self.assertEqual(proxy_widget.STATUS_KEY, STATUS_KEY)
+        stats = StatusMonitor("test")
+        stats.add_connection()
+        stats.add_inbound(42)
+        live = publisher.live_status(stats)
+        self.assertEqual(live["connections"], 1)
+        self.assertEqual(live["in_bytes"], 42)
+        self.assertEqual(read_status()["connections"], 0)
+        self.assertEqual(read_status()["in_bytes"], 0)
         self.assertEqual(proxy_widget.STALE_AFTER, STALE_AFTER)
-        self.assertEqual(proxy_widget.read_status(), read_status())
-        snapshot = read_status()
-        for age in (0, STALE_AFTER - 1, STALE_AFTER, STALE_AFTER + 1):
-            now = snapshot["updated_at"] + age
-            self.assertEqual(proxy_widget.display_state(snapshot, now),
-                             display_state(snapshot, now))
+        publisher.finish(stats=stats)
+        self.assertEqual(publisher.live_status(stats)["connections"], 0)
 
     def run_script(self, *, wifi=False, fail_start=False, native_stop=False,
                    stop_script=False, restart_script=False):

@@ -1,7 +1,8 @@
-"""Optional Pyto notifications and shared status for the widget extension."""
+"""Pyto lifecycle notifications, live status, and In App widget updates."""
 
 import logging
 import time
+from proxy_lib.pyto_widget import InAppWidgetPublisher
 
 
 STATUS_KEY = "ios_socks_server.status.v1"
@@ -41,6 +42,8 @@ class PytoStatusPublisher:
                  notifications_enabled=True, widget_enabled=True):
         self.notifications_enabled = notifications_enabled
         self.widget_enabled = widget_enabled
+        self.storage_enabled = widget_enabled
+        self.widget_publisher = InAppWidgetPublisher(enabled=widget_enabled)
         self.snapshot = {
             "state": "starting", "reason": "Starting proxy",
             "host": host, "socks_port": socks_port, "http_port": http_port,
@@ -56,16 +59,19 @@ class PytoStatusPublisher:
         self.last_publish = time.monotonic()
         if not self.widget_enabled:
             return
+        self.widget_publisher.submit(self.snapshot, final=self.finished)
+        if not self.storage_enabled:
+            return
         try:
             import userkeys
             # Pyto's argument order is value, key. Its app-group defaults are
             # accessible in both the app and the separate widget process.
             userkeys.set(dict(self.snapshot), STATUS_KEY)
         except ImportError:
-            self.widget_enabled = False
+            self.storage_enabled = False
         except Exception as error:
             logging.warning("Could not publish Pyto proxy status: %s", error)
-            self.widget_enabled = False
+            self.storage_enabled = False
 
     def _notify(self, message):
         if not self.notifications_enabled:
@@ -80,6 +86,14 @@ class PytoStatusPublisher:
 
     def starting(self):
         self._publish()
+
+    def live_status(self, stats=None):
+        """Pull current counters rather than the last persisted heartbeat."""
+        data = dict(self.snapshot)
+        if stats is not None and not self.finished:
+            data.update(stats.snapshot())
+        data["updated_at"] = time.time()
+        return data
 
     def running(self):
         if self.finished:
@@ -108,4 +122,5 @@ class PytoStatusPublisher:
         self.snapshot.update(state="failed" if failed else "stopped", reason=reason,
                              connections=0, in_mbps=0, out_mbps=0)
         self._publish()
+        self.widget_publisher.wait_closed()
         self._notify(f"Proxy {'failed' if failed else 'stopped'}\n{reason}")

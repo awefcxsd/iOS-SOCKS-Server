@@ -408,7 +408,10 @@ def run():
         shutdown_reason = "Restart requested by restart.py"
         shutdown_requested.set()
 
-    stop_control = PytoProxyControl(request_script_shutdown, request_script_restart)
+    stop_control = PytoProxyControl(
+        request_script_shutdown, request_script_restart,
+        get_status=lambda: status_publisher.live_status(stats),
+    )
 
     def emergency_stop_services():
         # Pyto's native Stop can park the owning thread without running finally.

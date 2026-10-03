@@ -114,35 +114,37 @@ the startup interface/address, with `WIFI_NETWORK_NAME` used only as a label.
 
 To install the widget:
 
-1. Open `proxy_widget.py` in Pyto and run it once to preview/register it. The
-   widget script is self-contained and can be copied separately from the project;
-   the server still needs its `proxy_lib` folder.
-2. Add a **Pyto > Run Script** widget to your iPhone Home Screen. Edit the widget
-   and select `proxy_widget.py`. Medium size shows addresses and traffic; large
-   also shows totals, errors, and the last event.
-3. Run `socks5.py` with `ENABLE_STATUS_WIDGET = True` (the default).
+1. Update the full project in Pyto and run `socks5.py` with
+   `ENABLE_STATUS_WIDGET = True` (the default). The server registers a named
+   **iOS Proxy** widget and updates it directly from its current counters.
+2. Add a **Pyto > In App** widget to your iPhone Home Screen. Edit the widget
+   and select **iOS Proxy**. Remove the old **Run Script** widget if installed.
+   Medium size shows addresses and traffic; large also shows totals, errors,
+   and the last event.
+3. If the widget name is not listed yet, run `proxy_widget.py` once in Pyto.
+   This self-contained script pulls live status from the running server and
+   saves the same named In App widget. It can also register an unavailable
+   state before the server has started.
 
-The server saves its status every five seconds in Pyto's shared `userkeys`
-storage, which the separate widget process can read without starting a proxy
-or making network requests. Only the most recent proxy run is displayed.
-The widget requests a refresh after about a minute, but iOS may delay it.
-“Running (snapshot)” means the listeners were running at the displayed update
-time; it does not prove internet connectivity. A timeline entry changes that
-snapshot to “Status unconfirmed” once it is 60 seconds old. This can occur while
-the proxy is still working if iOS delays widget refreshes. Tapping the widget
-opens its script in Pyto and prints the latest status and PAC URL.
+While running, the server publishes current connections, throughput, and totals
+every five seconds, plus immediately at startup, shutdown, failure, and restart.
+Publishing runs on a separate helper thread so widget rendering does not block
+proxy networking. Automatic updates save native widget layouts without opening
+preview sheets. Tapping the widget opens `proxy_widget.py`, which reads the
+current counters through an authenticated `STATUS` request to the loopback
+control listener. Shared storage supplies only the listener port and token;
+the widget does not read the persisted traffic heartbeat.
 
-Normal Stop, Pyto's native Stop watcher, and Wi-Fi shutdown save a stopped
-status. If iOS terminates the entire app, Python cannot send a shutdown alert;
-the old heartbeat becomes unconfirmed. These features safely skip unavailable
-Pyto APIs on other hosts. See [Pyto widgets](https://pyto.readthedocs.io/en/latest/library/widgets.html)
+The In App widget uses native text/layout elements rather than a bitmap
+snapshot or precomputed running/stale timeline. iOS still controls Home Screen
+refresh timing, so publishing every five seconds does not guarantee the screen
+refreshes every five seconds. The relative “Updated” time indicates the age of
+the displayed data. If iOS terminates Pyto, no further updates or stop alert can
+be sent; tapping the widget reports that the live server is unavailable.
+“Running” means proxy listeners are active, rather than proving internet
+connectivity. These features safely skip unavailable Pyto APIs on other hosts.
+See [Pyto widgets](https://pyto.readthedocs.io/en/latest/library/widgets.html)
 and [notifications](https://pyto.readthedocs.io/en/latest/library/notifications.html).
-
-If the widget shows a solid green background but previews correctly in Pyto,
-replace `proxy_widget.py` with the current version, run it once, and reselect
-the script in Edit Widget (remove and re-add the widget if iOS keeps old content).
-Pyto's Home Screen extension uses `runpy.run_path()`; the script supports that
-entry point as well as normal in-app execution.
 
 # Why
 

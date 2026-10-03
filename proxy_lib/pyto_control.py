@@ -1,6 +1,7 @@
 """Loopback-only lifecycle commands, independent of Pyto's process lifecycle."""
 
 import logging
+import json
 import secrets
 import socket
 import threading
@@ -12,10 +13,11 @@ CONTROL_KEY = "ios_socks_server.control.v1"
 
 
 class PytoProxyControl:
-    def __init__(self, on_stop, on_restart=None):
+    def __init__(self, on_stop, on_restart=None, get_status=None):
         self.on_stop = on_stop
         self.on_restart = on_restart
         self.command_requested = False
+        self.get_status = get_status
         self.done = threading.Event()
         self.listener = None
         self.thread = None
@@ -35,7 +37,8 @@ class PytoProxyControl:
             self.listener.settimeout(0.2)
             self.storage.set({"port": self.listener.getsockname()[1],
                               "token": self.token,
-                              "restart_supported": self.on_restart is not None}, CONTROL_KEY)
+                              "restart_supported": self.on_restart is not None,
+                              "status_supported": self.get_status is not None}, CONTROL_KEY)
             self.thread = service_thread(target=self._serve, name="proxy-stop-control", daemon=True)
             self.thread.start()
             return True
@@ -58,6 +61,10 @@ class PytoProxyControl:
                     with client.makefile("rb") as reader:
                         request = reader.readline(256)
                     token_line = self.token.encode("ascii") + b"\n"
+                    if (self.get_status is not None
+                            and secrets.compare_digest(request, b"STATUS " + token_line)):
+                        client.sendall(json.dumps(self.get_status()).encode("utf-8") + b"\n")
+                        continue
                     restart = secrets.compare_digest(request, b"RESTART " + token_line)
                     stop = secrets.compare_digest(request, token_line)
                     if not (stop or (restart and self.on_restart is not None)):
