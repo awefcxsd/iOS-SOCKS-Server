@@ -167,17 +167,26 @@ class PytoStatusTests(unittest.TestCase):
             self.assertEqual(proxy_widget.display_state(snapshot, now),
                              display_state(snapshot, now))
 
-    def run_script(self, *, wifi=False, fail_start=False, native_stop=False):
+    def run_script(self, *, wifi=False, fail_start=False, native_stop=False,
+                   stop_script=False, restart_script=False):
         """Exercise run() without iOS interface detection or real listeners."""
         path = Path(__file__).resolve().parents[1] / "socks5.py"
         tree = ast.parse(path.read_text())
         run_node = next(node for node in tree.body
                         if isinstance(node, ast.FunctionDef) and node.name == "run")
+        entry_node = next(node for node in tree.body
+                          if isinstance(node, ast.FunctionDef) and node.name == "run_proxy")
         watcher = Mock()
         watcher.start.return_value = False
         servers = []
 
         def make_server(*args, **kwargs):
+            if restart_script and len(servers) == 2:
+                # The replacement must not start until old coroutine cleanup
+                # has completed; otherwise fixed listener ports can collide.
+                for previous in servers:
+                    previous.close.assert_awaited_once()
+                    previous.stop_now.assert_called()
             server = Mock()
             server.start = AsyncMock()
             server.close = AsyncMock()
@@ -194,7 +203,7 @@ class PytoStatusTests(unittest.TestCase):
 
         def run_until(coro, stop):
             async def scenario():
-                if wifi or fail_start:
+                if wifi or fail_start or stop_script or restart_script:
                     await coro
                     return
                 task = asyncio.create_task(coro)
@@ -211,14 +220,24 @@ class PytoStatusTests(unittest.TestCase):
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
             asyncio.run(scenario())
-            if not wifi:
+            if not wifi and not stop_script and not restart_script:
                 raise KeyboardInterrupt
 
         watcher_factory = Mock(return_value=watcher)
+        control_factory = Mock()
+        control_factory.return_value.start.return_value = False
+        if stop_script:
+            control_factory.return_value.start.side_effect = lambda: control_factory.call_args.args[0]()
+        if restart_script:
+            def request_restart_then_stop():
+                callbacks = control_factory.call_args.args
+                callbacks[1 if control_factory.call_count == 1 else 0]()
+            control_factory.return_value.start.side_effect = request_restart_then_stop
         namespace = dict(
             asyncio=asyncio, logging=logging, threading=threading,
             BackgroundAudio=Mock(), PytoStopWatcher=watcher_factory,
             PytoStatusPublisher=PytoStatusPublisher, cleanup_steps=cleanup_steps,
+            PytoProxyControl=control_factory,
             create_wpad_server=Mock(), stop_wpad_server=Mock(),
             run_wpad_server=Mock(), service_thread=make_thread,
             run_until_stopped=run_until, StatusMonitor=StatusMonitor,
@@ -233,8 +252,8 @@ class PytoStatusTests(unittest.TestCase):
             REFRESH_SOURCE_ADDRESSES=False, connect_interface_ipv4=None,
             CONNECT_HOST_IPV4=None, resolver=None, monitor_wifi_connection=Mock(),
         )
-        exec(compile(ast.Module(body=[run_node], type_ignores=[]), str(path), "exec"), namespace)
-        namespace["run"]()
+        exec(compile(ast.Module(body=[run_node, entry_node], type_ignores=[]), str(path), "exec"), namespace)
+        namespace["run_proxy"]()
         return servers
 
     def test_normal_stop_publishes_once_after_listener_start_and_closes_services(self):
@@ -262,6 +281,30 @@ class PytoStatusTests(unittest.TestCase):
         self.assertEqual(self.notifications.send_notification.call_count, 2)
         for server in servers:
             server.emergency_stop.assert_called_once()
+
+    def test_stop_script_requests_normal_cleanup_without_interrupting_pyto(self):
+        servers = self.run_script(stop_script=True)
+        self.assertEqual(read_status()["reason"], "Stopped by stop.py")
+        self.assertEqual(read_status()["state"], "stopped")
+        self.assertEqual(self.notifications.send_notification.call_count, 2)
+        for server in servers:
+            server.stop_now.assert_called()
+            server.close.assert_awaited()
+            server.emergency_stop.assert_not_called()
+
+    def test_restart_finishes_cleanup_before_starting_a_fresh_run(self):
+        servers = self.run_script(restart_script=True)
+        self.assertEqual(len(servers), 4)
+        for server in servers:
+            server.close.assert_awaited_once()
+            server.emergency_stop.assert_not_called()
+        messages = [call.kwargs["message"] for call in self.notifications.Notification.call_args_list]
+        self.assertEqual(len(messages), 4)
+        self.assertIn("Proxy started", messages[0])
+        self.assertIn("Restart requested by restart.py", messages[1])
+        self.assertIn("Proxy started", messages[2])
+        self.assertIn("Stopped by stop.py", messages[3])
+        self.assertEqual(read_status()["state"], "stopped")
 
 
 if __name__ == "__main__":

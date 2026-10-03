@@ -83,6 +83,27 @@ A simple HTTP/SOCKS proxy designed to run on Pythonista on iOS, letting you fake
 
 ## Pyto notifications and Home Screen status widget
 
+To stop just the proxy, run `stop.py` in Pyto on the same iPhone. Restart the
+updated `socks5.py` once before using this command. The server opens a control
+listener only on `127.0.0.1`, at an automatically selected port, and saves a
+per-run token in Pyto's shared storage. `stop.py` requests the existing cleanup
+path: proxy connections, UDP relays, WPAD, and background audio close, and status
+changes to stopped. It does not terminate Pyto or interrupt unrelated scripts.
+The stop command works even when status notifications or the widget are disabled.
+`stop.py` is self-contained and can be copied or launched separately from the
+project. If no updated proxy is running, it prints a message and exits normally.
+
+Run `restart.py` in Pyto to restart a running proxy. It sends an authenticated
+restart command to the same local control listener. The owning `socks5.py` script
+finishes cleanup before reopening the proxy, WPAD, and background audio with
+fresh statistics and a new control token. Pyto and unrelated scripts stay open.
+Existing client connections close and must reconnect. This reuses the settings
+and addresses selected by the running script; rerun `socks5.py` manually to
+reload changed configuration or detect a different Wi-Fi interface/address.
+If the proxy is already stopped, run `socks5.py` to start it. Restart requires
+the updated `socks5.py` and `proxy_lib/pyto_control.py`; `restart.py` itself is
+self-contained.
+
 The proxy sends a notification after both proxy listeners start, when you stop
 it, when the Wi-Fi monitor triggers shutdown, or when startup/runtime fails.
 Allow notifications for Pyto when prompted, or enable them in iOS Settings >

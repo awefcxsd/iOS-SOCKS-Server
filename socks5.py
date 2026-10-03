@@ -16,6 +16,7 @@ from proxy_lib.proxy_server import AsyncProxyServer
 from proxy_lib.socks5_server import AsyncSocks5Handler
 from proxy_lib.status import StatusMonitor
 from proxy_lib.pyto_status import PytoStatusPublisher
+from proxy_lib.pyto_control import PytoProxyControl
 
 logging.basicConfig(level=logging.ERROR)
 
@@ -392,11 +393,27 @@ def run():
     )
     shutdown_reason = "Stopped by user"
     shutdown_failed = False
+    restart_requested = False
+    shutdown_requested = threading.Event()
+
+    def request_script_shutdown():
+        nonlocal shutdown_reason, restart_requested
+        restart_requested = False
+        shutdown_reason = "Stopped by stop.py"
+        shutdown_requested.set()
+
+    def request_script_restart():
+        nonlocal shutdown_reason, restart_requested
+        restart_requested = True
+        shutdown_reason = "Restart requested by restart.py"
+        shutdown_requested.set()
+
+    stop_control = PytoProxyControl(request_script_shutdown, request_script_restart)
 
     def emergency_stop_services():
         # Pyto's native Stop can park the owning thread without running finally.
         # This callback runs independently and must not rely on asyncio callbacks.
-        steps = [monitor_stop_event.set]
+        steps = [monitor_stop_event.set, stop_control.stop]
         steps.extend(server.emergency_stop for server in proxy_servers)
         steps.append(background_audio.stop)
         if wpad_server is not None:
@@ -406,7 +423,7 @@ def run():
         print("Pyto Stop detected; proxy sockets and background audio stopped.")
 
     def stop_services():
-        steps = [monitor_stop_event.set]
+        steps = [monitor_stop_event.set, stop_control.stop]
         if stop_watcher is not None:
             steps.append(stop_watcher.stop)
         steps.extend(server.stop_now for server in proxy_servers)
@@ -505,20 +522,20 @@ def run():
             proxy_servers.extend((socks_server, http_server))
             await asyncio.gather(socks_server.start(), http_server.start())
             status_publisher.running()
+            if stop_control.start():
+                print("Run stop.py or restart.py in Pyto to control this proxy without closing the app.")
             stats_task = asyncio.create_task(stats.render_forever())
-            shutdown_event = asyncio.Event()
             monitor_thread = None
             if (
                 EXIT_ON_WIFI_DISCONNECT
                 and wifi_interface_name
                 and wifi_interface_address
             ):
-                loop = asyncio.get_running_loop()
-
                 def request_wifi_shutdown():
-                    nonlocal shutdown_reason
+                    nonlocal shutdown_reason, restart_requested
+                    restart_requested = False
                     shutdown_reason = "WiFi network {} disconnected".format(WIFI_NETWORK_NAME)
-                    loop.call_soon_threadsafe(shutdown_event.set)
+                    shutdown_requested.set()
 
                 monitor_thread = service_thread(
                     target=monitor_wifi_connection,
@@ -534,12 +551,9 @@ def run():
                 monitor_thread.start()
 
             try:
-                await shutdown_event.wait()
-                print(
-                    "WiFi network {} disconnected; shutting down server.".format(
-                        WIFI_NETWORK_NAME
-                    )
-                )
+                while not shutdown_requested.is_set():
+                    await asyncio.sleep(0.25)
+                print("{}; shutting down server.".format(shutdown_reason))
             finally:
                 stop_services()
                 stats_task.cancel()
@@ -553,6 +567,7 @@ def run():
         try:
             run_until_stopped(main(), stop_services)
         except (KeyboardInterrupt, SystemExit):
+            restart_requested = False
             print("Shutting down.")
     except Exception as error:
         shutdown_reason = "{}: {}".format(type(error).__name__, error)
@@ -561,7 +576,19 @@ def run():
     finally:
         stop_services()
         status_publisher.finish(shutdown_reason, failed=shutdown_failed, stats=stats)
+    return restart_requested
+
+
+def run_proxy():
+    """Restart in the owning script after all of the previous run's cleanup."""
+    global initial_output
+    startup_banner = initial_output
+    while True:
+        initial_output = startup_banner
+        if not run():
+            return
+        print("Restarting proxy server.")
 
 
 if __name__ == "__main__":
-    run()
+    run_proxy()
