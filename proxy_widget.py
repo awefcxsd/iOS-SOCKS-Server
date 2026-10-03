@@ -2,8 +2,37 @@
 """Run once in Pyto, then select this script in a Pyto Run Script widget."""
 
 from datetime import datetime, timedelta
+import time
 
-from proxy_lib.pyto_status import STALE_AFTER, display_state, read_status
+# Keep this script self-contained: Pyto's widget extension may copy/run only
+# this file, without the project's sibling packages on its import path.
+# This storage key and expiry must match proxy_lib/pyto_status.py.
+STATUS_KEY = "ios_socks_server.status.v1"
+STALE_AFTER = 60
+
+
+def read_status():
+    try:
+        import userkeys
+        value = userkeys.get(STATUS_KEY)
+        return value if isinstance(value, dict) else {}
+    except (ImportError, KeyError):
+        return {}
+    except Exception as error:
+        print("Could not read Pyto proxy status:", error)
+        return {}
+
+
+def display_state(snapshot, now=None):
+    state = snapshot.get("state", "unknown")
+    if state in ("starting", "running"):
+        try:
+            age = (time.time() if now is None else now) - float(snapshot["updated_at"])
+            if age < -1 or age >= STALE_AFTER:
+                return "stale"
+        except (KeyError, TypeError, ValueError):
+            return "unknown"
+    return state
 
 
 def build_widget(wd, snapshot, date):

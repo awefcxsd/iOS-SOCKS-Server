@@ -3,7 +3,9 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 import logging
+import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -15,6 +17,7 @@ from proxy_lib.pyto_status import (
 from proxy_lib.status import StatusMonitor
 from proxy_lib.lifecycle import cleanup_steps
 from proxy_widget import build_widget, main as widget_main
+import proxy_widget
 
 
 class PytoStatusTests(unittest.TestCase):
@@ -121,6 +124,29 @@ class PytoStatusTests(unittest.TestCase):
         self.assertEqual(provider.reload_time().total_seconds(), 0)
         build_widget(wd, {}, datetime.now())
         self.assertIn("No status yet", [call.args[0] for call in wd.Text.call_args_list])
+
+    def test_widget_runs_as_a_standalone_file_without_project_imports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            standalone = Path(directory) / "proxy_widget.py"
+            standalone.write_text(Path(proxy_widget.__file__).read_text())
+            result = subprocess.run(
+                [sys.executable, "-I", str(standalone)], cwd=directory,
+                capture_output=True, text=True, timeout=10,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("This widget requires Pyto", result.stdout)
+
+    def test_standalone_widget_reads_the_servers_shared_status_and_expiry(self):
+        publisher = self.publisher()
+        publisher.running()
+        self.assertEqual(proxy_widget.STATUS_KEY, STATUS_KEY)
+        self.assertEqual(proxy_widget.STALE_AFTER, STALE_AFTER)
+        self.assertEqual(proxy_widget.read_status(), read_status())
+        snapshot = read_status()
+        for age in (0, STALE_AFTER - 1, STALE_AFTER, STALE_AFTER + 1):
+            now = snapshot["updated_at"] + age
+            self.assertEqual(proxy_widget.display_state(snapshot, now),
+                             display_state(snapshot, now))
 
     def run_script(self, *, wifi=False, fail_start=False, native_stop=False):
         """Exercise run() without iOS interface detection or real listeners."""

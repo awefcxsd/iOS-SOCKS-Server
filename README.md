@@ -93,8 +93,9 @@ the startup interface/address, with `WIFI_NETWORK_NAME` used only as a label.
 
 To install the widget:
 
-1. Keep `proxy_widget.py` and the `proxy_lib` folder together in the downloaded
-   project in Pyto. Run `proxy_widget.py` once to preview/register it.
+1. Open `proxy_widget.py` in Pyto and run it once to preview/register it. The
+   widget script is self-contained and can be copied separately from the project;
+   the server still needs its `proxy_lib` folder.
 2. Add a **Pyto > Run Script** widget to your iPhone Home Screen. Edit the widget
    and select `proxy_widget.py`. Medium size shows addresses and traffic; large
    also shows totals, errors, and the last event.
