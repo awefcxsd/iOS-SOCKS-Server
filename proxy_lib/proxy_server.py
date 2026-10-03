@@ -34,6 +34,9 @@ async def close_writer(writer: asyncio.StreamWriter) -> None:
     writer.close()
     try:
         await asyncio.wait_for(writer.wait_closed(), timeout=CLOSE_TIMEOUT)
+    except asyncio.CancelledError:
+        writer.transport.abort()
+        raise
     except (OSError, asyncio.TimeoutError):
         writer.transport.abort()
 
@@ -133,6 +136,11 @@ class AsyncProxyServer:
         self.connect_host_ipv4 = connect_host_ipv4
         self.connect_host_ipv6 = connect_host_ipv6
         self.server: asyncio.Server | None = None
+        self._closing = False
+        self._client_tasks = set()
+        self._writers = set()
+        self._outbound_writers = {}
+        self._datagram_transports = set()
         self._configure_resolver_source()
 
     def _configure_resolver_source(self) -> None:
@@ -183,12 +191,15 @@ class AsyncProxyServer:
         )
 
     async def start(self) -> None:
+        self._closing = False
         self.server = await asyncio.start_server(
             self.client_connected,
             host=self.listen_hosts,
             port=self.listen_port,
             reuse_address=True,
         )
+        if self._closing:
+            self.server.close()
 
     async def run(self) -> None:
         await self.start()
@@ -197,24 +208,48 @@ class AsyncProxyServer:
         finally:
             await self.close()
 
+    def stop_now(self) -> None:
+        """Release sockets without waiting for coroutine cancellation."""
+        self._closing = True
+        if self.server is not None:
+            self.server.close()
+        for writer in tuple(self._writers):
+            writer.transport.abort()
+        for transport in tuple(self._datagram_transports):
+            transport.close()
+        for task in tuple(self._client_tasks):
+            task.cancel()
+
     async def close(self) -> None:
-        if self.server is None:
-            return
-        server = self.server
-        self.server = None
-        server.close()
-        await server.wait_closed()
+        self.stop_now()
+        if self._client_tasks:
+            await asyncio.wait(tuple(self._client_tasks), timeout=CLOSE_TIMEOUT)
+        if self.server is not None:
+            await asyncio.wait_for(self.server.wait_closed(), timeout=CLOSE_TIMEOUT)
+            self.server = None
 
     async def client_connected(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        handler = self.handler_class(reader, writer, server=self)
+        if self._closing:
+            writer.transport.abort()
+            return
+        task = asyncio.current_task()
+        self._client_tasks.add(task)
+        self._writers.add(writer)
+        self._outbound_writers[task] = set()
         self.traffic_stats.add_connection()
         try:
+            handler = self.handler_class(reader, writer, server=self)
             await handler.handle()
         finally:
             self.traffic_stats.remove_connection()
-            await close_writer(writer)
+            try:
+                writers = self._outbound_writers.pop(task, set()) | {writer}
+                await asyncio.gather(*(close_writer(item) for item in writers))
+            finally:
+                self._writers.difference_update(writers)
+                self._client_tasks.discard(task)
 
     async def ipv4_connect(self, address: SocketAddress) -> Connection:
         address = normalize_socket_address(address)
@@ -264,13 +299,22 @@ class AsyncProxyServer:
             )
             if not result:
                 raise exceptions[0]
-            return result
+            connection = result
         elif resolved.ipv4 is not None:
-            return await self.ipv4_connect(resolved.ipv4)
+            connection = await self.ipv4_connect(resolved.ipv4)
         elif resolved.ipv6 is not None:
-            return await self.ipv6_connect(resolved.ipv6)
+            connection = await self.ipv6_connect(resolved.ipv6)
         else:
             raise Exception("Host %s could not be resolved" % (address,))
+        writer = connection[1]
+        if self._closing:
+            writer.transport.abort()
+            raise asyncio.CancelledError()
+        task = asyncio.current_task()
+        if task in self._outbound_writers:
+            self._writers.add(writer)
+            self._outbound_writers[task].add(writer)
+        return connection
 
     async def dummy_resolve(self):
         raise Exception("address family not supported")

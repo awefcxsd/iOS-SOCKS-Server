@@ -82,6 +82,13 @@ class UdpForwarder:
         self.connections: dict[
             tuple[asyncio.DatagramTransport, SocketAddress], SocketAddress
         ] = {}
+        self.client_conn = None
+
+    def track_transport(self, transport):
+        self.server._datagram_transports.add(transport)
+        if self.server._closing:
+            transport.close()
+            raise asyncio.CancelledError()
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -91,6 +98,7 @@ class UdpForwarder:
             family=client_family,
             local_addr=(self.local_address, 0),
         )
+        self.track_transport(self.client_conn)
 
         connect_host_ipv4 = self.server.connect_host_ipv4
         connect_host_ipv6 = self.server.connect_host_ipv6
@@ -105,6 +113,7 @@ class UdpForwarder:
                 family=socket.AF_INET,
                 local_addr=(connect_host_ipv4, 0),
             )
+            self.track_transport(self.server_conn_ipv4)
 
         if connect_host_ipv6 is not None:
             self.server_conn_ipv6, _ = await loop.create_datagram_endpoint(
@@ -112,6 +121,7 @@ class UdpForwarder:
                 family=socket.AF_INET6,
                 local_addr=(connect_host_ipv6, 0),
             )
+            self.track_transport(self.server_conn_ipv6)
 
     async def on_client_datagram(
         self,
@@ -186,11 +196,10 @@ class UdpForwarder:
         return address, port
 
     def close(self) -> None:
-        self.client_conn.close()
-        if self.server_conn_ipv4:
-            self.server_conn_ipv4.close()
-        if self.server_conn_ipv6:
-            self.server_conn_ipv6.close()
+        for transport in (self.client_conn, self.server_conn_ipv4, self.server_conn_ipv6):
+            if transport is not None:
+                transport.close()
+                self.server._datagram_transports.discard(transport)
 
 
 class AsyncSocks5Handler(AsyncProxyHandler):
@@ -297,8 +306,12 @@ class AsyncSocks5Handler(AsyncProxyHandler):
             udp_forwarder = UdpForwarder(self.log_tag, self.server, csock_addr)
             await udp_forwarder.start()
         except Exception as e:
+            udp_forwarder.close()
             self.send_reply(Socks5Status.ERROR)
             raise e
+        except BaseException:
+            udp_forwarder.close()
+            raise
 
         udp_sock_address = normalize_socket_address(
             udp_forwarder.client_conn.get_extra_info("sockname")

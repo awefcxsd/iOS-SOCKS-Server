@@ -41,8 +41,13 @@ A simple HTTP/SOCKS proxy designed to run on Pythonista on iOS, letting you fake
   after an iOS audio-session interruption. The status display identifies it as
   `Pyto BackgroundTask`.
 - Server shutdown bypasses Pyto's thread-interrupting `BackgroundTask.stop()`
-  wrapper and stops its native task directly, allowing the proxy sockets and
-  WPAD server to finish cleanup when Pyto's Stop button is pressed.
+  wrapper and stops its native task directly. Pyto's Stop button (`SystemExit`)
+  and keyboard interrupts both trigger cleanup: listening sockets, active TCP
+  tunnels, and UDP relays close, and background audio stops before waiting for
+  coroutine cancellation. The remaining tasks get up to five seconds to finish.
+  WPAD requests have a one-second socket timeout, and WPAD shutdown uses bounded
+  thread waits. Cleanup also runs if startup fails, and a failed cleanup action
+  does not prevent the other actions from running.
 - By default, the server watches the Wi-Fi or hotspot bridge interface and IPv4 address present
   at startup as `Subaru_5G`. If that connection disappears or changes for six
   seconds, the proxy, WPAD server, and background audio are stopped. Start the

@@ -3,6 +3,8 @@ import os
 import struct
 import wave
 
+from .lifecycle import cleanup_steps
+
 
 class BackgroundAudio:
     """Keep Pythonista's audio session active while the proxy is running."""
@@ -174,13 +176,25 @@ class BackgroundAudio:
         return True
 
     def stop(self):
+        steps = []
         if self.background_task is not None:
-            self._stop_pyto_background_task()
+            steps.append(self._stop_pyto_background_task)
         if self.player is not None:
+            steps.append(self._stop_player)
+        if self.native_session_active:
+            steps.append(self._stop_audio_session)
+        cleanup_steps(*steps)
+
+    def _stop_player(self):
+        try:
             self.player.stop()
+        finally:
             self.player = None
             self.player_backend = None
-        if self.native_session_active:
+
+    def _stop_audio_session(self):
+        try:
             self.audio_session.setActive_withOptions_error_(False, 1, None)
+        finally:
             self.native_session_active = False
             self.audio_session = None

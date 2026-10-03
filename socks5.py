@@ -10,6 +10,7 @@ import threading
 
 from proxy_lib.background_audio import BackgroundAudio
 from proxy_lib.http_proxy_server import AsyncHTTPProxyHandler
+from proxy_lib.lifecycle import cleanup_steps, run_until_stopped, stop_wpad_server
 from proxy_lib.proxy_server import AsyncProxyServer
 from proxy_lib.socks5_server import AsyncSocks5Handler
 from proxy_lib.status import StatusMonitor
@@ -387,7 +388,17 @@ def monitor_wifi_connection(
 
 
 def create_wpad_server(hhost, hport, phost, pport):
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class WPADServer(ThreadingHTTPServer):
+        daemon_threads = True
+        block_on_close = False
+        allow_reuse_address = True
+
+        def get_request(self):
+            request, address = super().get_request()
+            request.settimeout(1)
+            return request, address
 
     class HTTPHandler(BaseHTTPRequestHandler):
         def do_HEAD(s):
@@ -421,153 +432,172 @@ function FindProxyForURL(url, host)
                 .encode()
             )
 
-    HTTPServer.allow_reuse_address = True
-    server = HTTPServer((hhost, hport), HTTPHandler)
+    server = WPADServer((hhost, hport), HTTPHandler)
     return server
 
 
 def run_wpad_server(server):
     try:
         server.serve_forever()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         pass
 
 
-if __name__ == "__main__":
+def run():
+    global initial_output
     background_audio = BackgroundAudio(test_tone=BACKGROUND_AUDIO_TEST_TONE)
-    background_audio_enabled = KEEP_ALIVE_WITH_AUDIO and background_audio.start()
-
-    wpad_server = create_wpad_server(LISTEN_HOST, WPAD_PORT, PROXY_HOST, SOCKS_PORT)
-
-    if background_audio_enabled:
-        audio_mode = "440 Hz test tone" if BACKGROUND_AUDIO_TEST_TONE else "silence"
-        if background_audio.player_backend == "Pyto BackgroundTask":
-            session_mode = "Pyto background task"
-        elif background_audio.native_session_active:
-            session_mode = "native playback session"
-        else:
-            session_mode = "Pythonista player only"
-        initial_output += "Background audio enabled ({}, {}, {})\n".format(
-            audio_mode, session_mode, background_audio.player_backend
-        )
-        if background_audio.host_supports_background_audio is False:
-            initial_output += (
-                "Warning: Pythonista does not declare the iOS audio background mode; "
-                "playback will pause when the app leaves the foreground.\n"
-            )
-        elif background_audio.host_supports_background_audio is True:
-            initial_output += "Host app declares the iOS audio background mode\n"
-    elif KEEP_ALIVE_WITH_AUDIO:
-        initial_output += "Background audio keep-alive unavailable: {}\n".format(
-            background_audio.error
-        )
-
-    initial_output += "PAC URL: http://{}:{}/wpad.dat\n".format(PROXY_HOST, WPAD_PORT)
-    initial_output += "SOCKS Address: {}:{}\n".format(
-        PROXY_HOST or LISTEN_HOST, SOCKS_PORT
-    )
-    initial_output += "HTTP Proxy Address: {}:{}\n".format(
-        PROXY_HOST or LISTEN_HOST, HTTP_PORT
-    )
-    if EXIT_ON_WIFI_DISCONNECT and wifi_interface_name and wifi_interface_address:
-        initial_output += (
-            "Auto-stop: watching {} on {} at {}\n".format(
-                WIFI_NETWORK_NAME,
-                wifi_interface_name,
-                wifi_interface_address,
-            )
-        )
-    elif EXIT_ON_WIFI_DISCONNECT:
-        initial_output += (
-            "Warning: auto-stop is enabled, but no WiFi connection was found "
-            "at startup\n"
-        )
-    stats = StatusMonitor(initial_output)
+    wpad_server = None
+    thread = None
+    stats = None
     root_logger = logging.getLogger()
-    root_logger.addHandler(stats)
+    proxy_servers = []
+    monitor_stop_event = threading.Event()
 
-    thread = threading.Thread(target=run_wpad_server, args=(wpad_server,))
-    thread.daemon = True
-    thread.start()
-
-    async def main():
-        source_address_provider = (
-            current_source_addresses
-            if REFRESH_SOURCE_ADDRESSES
-            and (connect_interface_ipv4 or connect_interface_ipv6)
-            else None
-        )
-        socks_server = AsyncProxyServer(
-            AsyncSocks5Handler,
-            listen_hosts=LISTEN_HOST,
-            listen_port=SOCKS_PORT,
-            traffic_stats=stats,
-            resolver=resolver,
-            connect_host_ipv4=CONNECT_HOST_IPV4,
-            connect_host_ipv6=CONNECT_HOST_IPV6,
-            source_address_provider=source_address_provider,
-        )
-        http_server = AsyncProxyServer(
-            AsyncHTTPProxyHandler,
-            listen_hosts=LISTEN_HOST,
-            listen_port=HTTP_PORT,
-            traffic_stats=stats,
-            resolver=resolver,
-            connect_host_ipv4=CONNECT_HOST_IPV4,
-            connect_host_ipv6=CONNECT_HOST_IPV6,
-            source_address_provider=source_address_provider,
-        )
-        await asyncio.gather(socks_server.start(), http_server.start())
-        stats_task = asyncio.create_task(stats.render_forever())
-        shutdown_event = asyncio.Event()
-        monitor_stop_event = threading.Event()
-        monitor_thread = None
-        if (
-            EXIT_ON_WIFI_DISCONNECT
-            and wifi_interface_name
-            and wifi_interface_address
-        ):
-            loop = asyncio.get_running_loop()
-
-            def request_wifi_shutdown():
-                loop.call_soon_threadsafe(shutdown_event.set)
-
-            monitor_thread = threading.Thread(
-                target=monitor_wifi_connection,
-                args=(
-                    wifi_interface_name,
-                    wifi_interface_address,
-                    monitor_stop_event,
-                    request_wifi_shutdown,
-                ),
-                name="wifi-disconnect-monitor",
-                daemon=True,
-            )
-            monitor_thread.start()
-
-        try:
-            await shutdown_event.wait()
-            print(
-                "WiFi network {} disconnected; shutting down server.".format(
-                    WIFI_NETWORK_NAME
-                )
-            )
-        finally:
-            monitor_stop_event.set()
-            await asyncio.gather(socks_server.close(), http_server.close())
-            stats_task.cancel()
-            await asyncio.gather(stats_task, return_exceptions=True)
-            if monitor_thread is not None:
-                monitor_thread.join(timeout=WIFI_CHECK_INTERVAL + 1)
+    def stop_services():
+        steps = [monitor_stop_event.set]
+        steps.extend(server.stop_now for server in proxy_servers)
+        steps.append(background_audio.stop)
+        if wpad_server is not None:
+            steps.append(lambda: stop_wpad_server(wpad_server, thread))
+        if stats is not None:
+            steps.extend((lambda: root_logger.removeHandler(stats), stats.close))
+        cleanup_steps(*steps)
 
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Shutting down.")
+        background_audio_enabled = KEEP_ALIVE_WITH_AUDIO and background_audio.start()
+
+        wpad_server = create_wpad_server(LISTEN_HOST, WPAD_PORT, PROXY_HOST, SOCKS_PORT)
+
+        if background_audio_enabled:
+            audio_mode = "440 Hz test tone" if BACKGROUND_AUDIO_TEST_TONE else "silence"
+            if background_audio.player_backend == "Pyto BackgroundTask":
+                session_mode = "Pyto background task"
+            elif background_audio.native_session_active:
+                session_mode = "native playback session"
+            else:
+                session_mode = "Pythonista player only"
+            initial_output += "Background audio enabled ({}, {}, {})\n".format(
+                audio_mode, session_mode, background_audio.player_backend
+            )
+            if background_audio.host_supports_background_audio is False:
+                initial_output += (
+                    "Warning: Pythonista does not declare the iOS audio background mode; "
+                    "playback will pause when the app leaves the foreground.\n"
+                )
+            elif background_audio.host_supports_background_audio is True:
+                initial_output += "Host app declares the iOS audio background mode\n"
+        elif KEEP_ALIVE_WITH_AUDIO:
+            initial_output += "Background audio keep-alive unavailable: {}\n".format(
+                background_audio.error
+            )
+
+        initial_output += "PAC URL: http://{}:{}/wpad.dat\n".format(PROXY_HOST, WPAD_PORT)
+        initial_output += "SOCKS Address: {}:{}\n".format(
+            PROXY_HOST or LISTEN_HOST, SOCKS_PORT
+        )
+        initial_output += "HTTP Proxy Address: {}:{}\n".format(
+            PROXY_HOST or LISTEN_HOST, HTTP_PORT
+        )
+        if EXIT_ON_WIFI_DISCONNECT and wifi_interface_name and wifi_interface_address:
+            initial_output += (
+                "Auto-stop: watching {} on {} at {}\n".format(
+                    WIFI_NETWORK_NAME,
+                    wifi_interface_name,
+                    wifi_interface_address,
+                )
+            )
+        elif EXIT_ON_WIFI_DISCONNECT:
+            initial_output += (
+                "Warning: auto-stop is enabled, but no WiFi connection was found "
+                "at startup\n"
+            )
+        stats = StatusMonitor(initial_output)
+        root_logger = logging.getLogger()
+        root_logger.addHandler(stats)
+
+        thread = threading.Thread(target=run_wpad_server, args=(wpad_server,))
+        thread.daemon = True
+        thread.start()
+
+        async def main():
+            source_address_provider = (
+                current_source_addresses
+                if REFRESH_SOURCE_ADDRESSES
+                and (connect_interface_ipv4 or connect_interface_ipv6)
+                else None
+            )
+            socks_server = AsyncProxyServer(
+                AsyncSocks5Handler,
+                listen_hosts=LISTEN_HOST,
+                listen_port=SOCKS_PORT,
+                traffic_stats=stats,
+                resolver=resolver,
+                connect_host_ipv4=CONNECT_HOST_IPV4,
+                connect_host_ipv6=CONNECT_HOST_IPV6,
+                source_address_provider=source_address_provider,
+            )
+            http_server = AsyncProxyServer(
+                AsyncHTTPProxyHandler,
+                listen_hosts=LISTEN_HOST,
+                listen_port=HTTP_PORT,
+                traffic_stats=stats,
+                resolver=resolver,
+                connect_host_ipv4=CONNECT_HOST_IPV4,
+                connect_host_ipv6=CONNECT_HOST_IPV6,
+                source_address_provider=source_address_provider,
+            )
+            proxy_servers.extend((socks_server, http_server))
+            await asyncio.gather(socks_server.start(), http_server.start())
+            stats_task = asyncio.create_task(stats.render_forever())
+            shutdown_event = asyncio.Event()
+            monitor_thread = None
+            if (
+                EXIT_ON_WIFI_DISCONNECT
+                and wifi_interface_name
+                and wifi_interface_address
+            ):
+                loop = asyncio.get_running_loop()
+
+                def request_wifi_shutdown():
+                    loop.call_soon_threadsafe(shutdown_event.set)
+
+                monitor_thread = threading.Thread(
+                    target=monitor_wifi_connection,
+                    args=(
+                        wifi_interface_name,
+                        wifi_interface_address,
+                        monitor_stop_event,
+                        request_wifi_shutdown,
+                    ),
+                    name="wifi-disconnect-monitor",
+                    daemon=True,
+                )
+                monitor_thread.start()
+
+            try:
+                await shutdown_event.wait()
+                print(
+                    "WiFi network {} disconnected; shutting down server.".format(
+                        WIFI_NETWORK_NAME
+                    )
+                )
+            finally:
+                stop_services()
+                stats_task.cancel()
+                await asyncio.gather(
+                    socks_server.close(), http_server.close(), stats_task,
+                    return_exceptions=True,
+                )
+                if monitor_thread is not None:
+                    monitor_thread.join(timeout=WIFI_CHECK_INTERVAL + 1)
+
+        try:
+            run_until_stopped(main(), stop_services)
+        except (KeyboardInterrupt, SystemExit):
+            print("Shutting down.")
     finally:
-        wpad_server.shutdown()
-        wpad_server.server_close()
-        thread.join(timeout=2)
-        background_audio.stop()
-        root_logger.removeHandler(stats)
-        stats.close()
+        stop_services()
+
+
+if __name__ == "__main__":
+    run()
