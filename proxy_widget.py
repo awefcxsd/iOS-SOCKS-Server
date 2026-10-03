@@ -115,5 +115,7 @@ def main():
     wd.provide_timeline(ProxyProvider())
 
 
-if __name__ == "__main__":
+# Pyto's app uses __main__, its Home Screen extension uses runpy.run_path's
+# default <run_path>, and its fallback widget-tap URL uses widget.
+if __name__ in ("__main__", "<run_path>", "widget"):
     main()

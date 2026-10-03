@@ -117,6 +117,12 @@ the old heartbeat becomes unconfirmed. These features safely skip unavailable
 Pyto APIs on other hosts. See [Pyto widgets](https://pyto.readthedocs.io/en/latest/library/widgets.html)
 and [notifications](https://pyto.readthedocs.io/en/latest/library/notifications.html).
 
+If the widget shows a solid green background but previews correctly in Pyto,
+replace `proxy_widget.py` with the current version, run it once, and reselect
+the script in Edit Widget (remove and re-add the widget if iOS keeps old content).
+Pyto's Home Screen extension uses `runpy.run_path()`; the script supports that
+entry point as well as normal in-app execution.
+
 # Why
 
 Recently, while travelling, I found out that Google Fi doesn't support tethering on iOS (I guess it's a feature they want to keep Android-exclusive or something?). Since my phone has a nice, fast, unblocked connection, I wanted to let my computer access it too.

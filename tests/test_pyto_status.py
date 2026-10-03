@@ -3,6 +3,7 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 import logging
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -135,6 +136,24 @@ class PytoStatusTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("This widget requires Pyto", result.stdout)
+
+    def test_home_screen_run_path_draws_widgets_and_tap_fallback_draws_too(self):
+        # Pyto's extension calls runpy.run_path(path) without run_name; its
+        # fallback tap URL executes the code with __name__ set to "widget".
+        wd = Mock()
+        wd.link = None
+        wd.TimelineProvider = object
+        wd.Widget.side_effect = lambda: Mock()
+        with patch.dict(sys.modules, widgets=wd):
+            namespace = runpy.run_path(proxy_widget.__file__)
+            self.assertEqual(namespace["__name__"], "<run_path>")
+            wd.provide_timeline.assert_called_once()
+            provider = wd.provide_timeline.call_args.args[0]
+            provider.widget(provider.timeline()[0])
+            self.assertIn("iOS Proxy", [call.args[0] for call in wd.Text.call_args_list])
+            wd.provide_timeline.reset_mock()
+            runpy.run_path(proxy_widget.__file__, run_name="widget")
+            wd.provide_timeline.assert_called_once()
 
     def test_standalone_widget_reads_the_servers_shared_status_and_expiry(self):
         publisher = self.publisher()
